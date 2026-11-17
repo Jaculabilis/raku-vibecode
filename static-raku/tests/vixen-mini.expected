@@ -1,0 +1,20 @@
+--- uses: self
+#!/usr/bin/env -S execlineb -s1
+importas -iS V
+define self $1
+backtick -E gs1 { ${V}/call: $self at: "parent*" }
+backtick -E gs2 { ${V}/call: $gs1 exists }
+echo $gs2
+--- uses: self
+#!/usr/bin/env -S execlineb -s2
+importas -iS V
+define self $1
+define source $2
+backtick -E gs1 { ${V}/call: $self at: "NixStore" }
+backtick -E gs2 { ${V}/call: $gs1 intern: $source }
+define obj $gs2
+backtick -E gs4 { ${V}/call: $obj name }
+backtick -E gs3 { ${V}/call: $self at:put: $gs4 $obj }
+echo $gs3
+answer from clone: to $V: $V clone: Allocator
+value of $V

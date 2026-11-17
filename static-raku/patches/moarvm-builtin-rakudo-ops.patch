@@ -1,0 +1,178 @@
+diff --git a/Configure.pl b/Configure.pl
+index 1fa0f75..18e3d50 100755
+--- a/Configure.pl
++++ b/Configure.pl
+@@ -8,6 +8,7 @@ use Cwd;
+ use Getopt::Long;
+ use Pod::Usage;
+ use File::Spec;
++use File::Copy qw(copy);
+ 
+ use lib '.';
+ use build::setup;
+@@ -49,7 +50,8 @@ GetOptions(\%args, qw(
+     prefix=s bindir=s libdir=s mastdir=s
+     relocatable make-install asan ubsan tsan
+     valgrind telemeh! dtrace show-autovect git-cache-dir=s
+-    show-autovect-failed:s mimalloc! has-mimalloc c11-atomics!),
++    show-autovect-failed:s mimalloc! has-mimalloc c11-atomics!
++    builtin-rakudo-ops=s),
+ 
+     'no-optimize|nooptimize' => sub { $args{optimize} = 0 },
+     'no-debug|nodebug' => sub { $args{debug} = 0 },
+@@ -472,6 +474,18 @@ $config{lddebugflags} = sprintf $config{lddebugflags}, defined_or $args{debug},
+ 
+ # generate CFLAGS
+ my @cflags;
++# Link Rakudo's extension ops into libmoar instead of loading them from
++# dynext/libperl6_ops_moar.so with dlopen, which static executables can't do.
++if ($args{'builtin-rakudo-ops'}) {
++    copy($args{'builtin-rakudo-ops'}, 'src/core/rakudo_ops.c')
++        or hardfail("Could not copy $args{'builtin-rakudo-ops'}: $!");
++    $config{rakudo_ops_object} = 'src/core/rakudo_ops@obj@';
++    push @cflags, $config{ccdef} . 'MVM_BUILTIN_RAKUDO_OPS';
++}
++else {
++    $config{rakudo_ops_object} = '';
++}
++
+ push @cflags, '-std=c99' if $defaults{os} eq 'mingw32';
+ push @cflags, '-fwrapv'             if $config{cc} ne 'cl';
+ push @cflags, $config{ccmiscflags};
+@@ -1302,6 +1316,12 @@ options.
+ Explicitly set the make tool without affecting other configuration
+ options.
+ 
++=item --builtin-rakudo-ops=<path/to/perl6_ops.c>
++
++Compile Rakudo's extension ops into libmoar, so that Rakudo's
++C<loadlib dynext/libperl6_ops_moar> is satisfied without dlopen.
++Required for fully static Rakudo executables.
++
+ =item --static
+ 
+ Build MoarVM as a static library instead of a shared one.
+diff --git a/build/Makefile.in b/build/Makefile.in
+index f872da0..299875a 100644
+--- a/build/Makefile.in
++++ b/build/Makefile.in
+@@ -254,6 +254,7 @@ OBJECTS2 = src/6model/reprs/MVMDLLSym@obj@ \
+           3rdparty/freebsd/memmem@obj@ \
+           3rdparty/ryu/ryu/d2s@obj@ \
+           @mimalloc_object@ \
++          @rakudo_ops_object@ \
+           src/platform/malloc_trim@obj@ \
+           src/moar@obj@ \
+           @platform@ \
+diff --git a/src/core/dll.c b/src/core/dll.c
+index 4c8fb65..a409c56 100644
+--- a/src/core/dll.c
++++ b/src/core/dll.c
+@@ -1,5 +1,54 @@
+ #include "moar.h"
+ 
++/* Extensions linked into the executable instead of living in a shared
++ * library. A `loadlib` whose file name matches one of these is satisfied
++ * without dlopen, which static executables cannot do (musl's static dlopen
++ * always fails). The library is then marked with MVM_DLL_BUILTIN and its
++ * symbols are looked up here rather than with dlsym. */
++#ifdef MVM_BUILTIN_RAKUDO_OPS
++void Rakudo_ops_init(MVMThreadContext *tc);
++#endif
++
++typedef struct {
++    const char *lib;    /* file name without directory or extension */
++    const char *sym;
++    void       *address;
++} MVMBuiltinExtSym;
++
++static const MVMBuiltinExtSym builtin_syms[] = {
++#ifdef MVM_BUILTIN_RAKUDO_OPS
++    { "libperl6_ops_moar", "Rakudo_ops_init", (void *)Rakudo_ops_init },
++#endif
++    { NULL, NULL, NULL }
++};
++
++static char builtin_marker;
++#define MVM_DLL_BUILTIN ((DLLib *)&builtin_marker)
++
++/* Does the (possibly relative) library path name a builtin library? */
++static int is_builtin_lib(const char *path) {
++    const char *base = strrchr(path, '/');
++    size_t len;
++    base = base ? base + 1 : path;
++    len  = strcspn(base, ".");
++    for (const MVMBuiltinExtSym *b = builtin_syms; b->lib; b++)
++        if (strlen(b->lib) == len && strncmp(base, b->lib, len) == 0)
++            return 1;
++    return 0;
++}
++
++static void *find_builtin_sym(const char *sym) {
++    for (const MVMBuiltinExtSym *b = builtin_syms; b->lib; b++)
++        if (strcmp(b->sym, sym) == 0)
++            return b->address;
++    return NULL;
++}
++
++void MVM_dll_free_lib(DLLib *lib) {
++    if (lib != MVM_DLL_BUILTIN)
++        MVM_nativecall_free_lib(lib);
++}
++
+ int MVM_dll_load(MVMThreadContext *tc, MVMString *name, MVMString *path) {
+     char *cpath;
+     DLLib *lib;
+@@ -23,7 +72,7 @@ int MVM_dll_load(MVMThreadContext *tc, MVMString *name, MVMString *path) {
+     }
+ 
+     cpath = MVM_string_utf8_c8_encode_C_string(tc, path);
+-    lib = MVM_nativecall_load_lib(cpath);
++    lib = is_builtin_lib(cpath) ? MVM_DLL_BUILTIN : MVM_nativecall_load_lib(cpath);
+ 
+     if (!lib) {
+         char *waste[] = { cpath, NULL };
+@@ -76,7 +125,7 @@ int MVM_dll_free(MVMThreadContext *tc, MVMString *name) {
+         MVM_exception_throw_adhoc_free(tc, waste, "cannot free in-use library '%s'", c_name);
+     }
+ 
+-    MVM_nativecall_free_lib(entry->lib);
++    MVM_dll_free_lib(entry->lib);
+     entry->lib = NULL;
+ 
+     uv_mutex_unlock(&tc->instance->mutex_dll_registry);
+@@ -115,7 +164,9 @@ MVMObject * MVM_dll_find_symbol(MVMThreadContext *tc, MVMString *lib,
+     }
+ 
+     csym = MVM_string_utf8_c8_encode_C_string(tc, sym);
+-    address = MVM_nativecall_find_sym(entry->lib, csym);
++    address = entry->lib == MVM_DLL_BUILTIN
++        ? find_builtin_sym(csym)
++        : MVM_nativecall_find_sym(entry->lib, csym);
+     MVM_free(csym);
+ 
+     if (!address) {
+diff --git a/src/core/dll.h b/src/core/dll.h
+index ba3611d..7ceb035 100644
+--- a/src/core/dll.h
++++ b/src/core/dll.h
+@@ -6,5 +6,6 @@ struct MVMDLLRegistry {
+ 
+ int MVM_dll_load(MVMThreadContext *tc, MVMString *name, MVMString *path);
+ int MVM_dll_free(MVMThreadContext *tc, MVMString *name);
++void MVM_dll_free_lib(DLLib *lib);
+ MVMObject * MVM_dll_find_symbol(MVMThreadContext *tc, MVMString *lib, MVMString *sym);
+ void MVM_dll_drop_symbol(MVMThreadContext *tc, MVMObject *obj);
+diff --git a/src/moar.c b/src/moar.c
+index 1b2bc21..4ec6e74 100644
+--- a/src/moar.c
++++ b/src/moar.c
+@@ -639,7 +639,7 @@ void MVM_vm_exit(MVMInstance *instance) {
+ 
+ static void free_lib(MVMThreadContext *tc, void *entry_v, void *arg) {
+     struct MVMDLLRegistry *entry = entry_v;
+-    MVM_nativecall_free_lib(entry->lib);
++    MVM_dll_free_lib(entry->lib);
+ }
+ 
+ /* Destroys a VM instance. This must be called only from the main thread. It

@@ -1,0 +1,936 @@
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Opus 5.5
+ ▝▝   ▝▝   ~/repos/raku/task2
+
+❯ Read https://gist.github.com/MostAwesomeDude/bb8cbfd005a33f5dd262d1f20a63a693 
+  We are going to work on Task 2.                                               
+  Research and identify why the Raku compiler can't be statically compiled.     
+
+  Listed 1 directory, ran 4 shell commands (ctrl+o to expand)
+  ⎿  1 action not run · permission denied
+     │ Reason: [error message redacted]
+
+⏺ I've read the challenge and am starting a test static build of Rakudo; the
+  Raku gist is blocked for me, so if you drop the prototype file into task2/ref/
+  I'll use it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Rakudo's libperl6_ops_moar.so is loaded at runtime via dlopen, which is a
+  likely obstacle for a static build. I'm now starting the static build attempts
+  in the background and fetching the sources at the matching release tags.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Background command "Build static (musl) MoarVM, NQP, Rakudo on Linux builder"
+completed (exit code 0)
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+❯ Added the vixen gist to task2/ref/vixen.md                                    
+
+⏺ Thanks for adding vixen.md; I'm reading it now. The pkgsStatic.rakudo package
+  in nixpkgs won't evaluate, since it assumes a shared library that the static
+  platform doesn't have, and a static MoarVM build is still running.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The attached blog post only shows excerpts, but that's enough: the compiler
+  needs only the core VM and compiler, with no NativeCall or external modules,
+  so a static Raku looks feasible. I'm now reading the MoarVM, NQP and Rakudo
+  sources to find what blocks static linking.
+
+  Ran 4 shell commands (ctrl+o to expand)
+
+⏺ The mechanism: MoarVM's loadlib opcode dlopens a shared library, and loadext
+  looks up an init symbol in it and calls it to register extra opcodes. Next I'm
+  checking where Rakudo does this.
+
+  Ran 6 shell commands (ctrl+o to expand)
+
+⏺ Rakudo's compiler needs dlopen to load its ops library, which a static musl
+  build can't provide, so the bytecode can't even start. The library is small
+  enough to patch, so I'm checking how the runner locates its .moarvm files
+  next.
+
+  Read 1 file, ran 5 shell commands (ctrl+o to expand)
+
+⏺ The static MoarVM build is still compiling its dependencies, because nixpkgs
+  pulls in a full static Perl. Meanwhile I found that raku loads its bytecode
+  files from a directory tree, and I'm searching for prior attempts at bundling
+  them into one binary.
+
+  Called [web search tool name redacted] 2 times (ctrl+o to expand)
+
+⏺ Fetch(https://perl-foundation-outreach.github.io/ideas/perl6/linking.html)
+  ⎿  Received 5.9KB (200 OK)
+
+  Called [web search tool name redacted] 2 times (ctrl+o to expand)
+
+⏺ Fetch(https://lobste.rs/s/igpevt/lobsters_vibecoding_challenge_winter)
+  ⎿  Received 173.2KB (200 OK)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The nixpkgs static MoarVM build is incidental, so I'm running a controlled
+  test: build MoarVM with --static against musl, then NQP and Rakudo on top, and
+  log where each step fails.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Background command "Show eval error, then build static MoarVM alone" failed
+with exit code 144
+
+  Ran 2 shell commands (ctrl+o to expand)
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: bash: log-hook-invocation.sh: No such file or directory
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: bash: log-hook-invocation.sh: No such file or directory
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: bash: log-hook-invocation.sh: No such file or directory
+  ⎿  PreToolUse:Bash hook error
+  ⎿  Failed with non-blocking status code: bash: log-hook-invocation.sh: No such file or directory
+
+⏺ MoarVM builds and links as a fully static musl executable using its own
+  --static flag (moar: ELF 64-bit … statically linked). So the VM itself is not
+  the blocker. Next: NQP.
+
+  Ran 2 shell commands (ctrl+o to expand)
+⏺ NQP's bootstrap ran fine on the static moar, and only the nqp launcher link
+  fails with 1,852 undefined symbols from libuv, libtommath, cmp and dyncall.
+  That's a packaging gap, since libmoar.a ships without the bundled third-party
+  archives, so I'm merging them in and continuing.
+
+⏺ Update(nix/static-rakudo.nix)
+  ⎿  Added 9 lines
+      15      preConfigure = ''
+      16        configureFlagsArray+=(--static "--ld=cc -static")
+      17      '';
+      18 +    # Workaround #1: a --static install only ships libmoar.a, n
+         +ot the bundled                                                 
+      19 +    # 3rdparty archives (libuv, libtommath, cmp, dyncall), so a
+         +nything linking                                                
+      20 +    # libmoar.a (the nqp/rakudo C runners) gets ~1850 undefined
+         + symbols.                                                      
+      21 +    # Fold them into libmoar.a.                                
+      22      postInstall = ''
+      23        echo "=== file moar ==="; file $out/bin/moar
+      24 +      echo "=== 3rdparty archives ==="; find 3rdparty -name '*.
+         +a' | tee thirdparty.list                                       
+      25 +      { echo "create libmoar-full.a"; echo "addlib $out/lib/lib
+         +moar.a"                                                        
+      26 +        while read a; do echo "addlib $a"; done < thirdparty.li
+         +st                                                             
+      27 +        echo save; echo end; } | ar -M                         
+      28 +      mv libmoar-full.a $out/lib/libmoar.a                     
+      29        ls -la $out/lib
+      30      '';
+      31    });
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ NQP works as a fully static musl binary: the build prints hello from static 
+  nqp. So NQP, the language Rakudo is written in, has no static-linking problem.
+  Next: Rakudo.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Rakudo insists on building dynext/libperl6_ops_moar.so, but MoarVM's cc 
+  -static link can't produce a shared object, and the static runner couldn't
+  dlopen it anyway. I'm letting the .so link normally to confirm the static VM
+  fails on it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Update(nix/static-rakudo.nix)
+  ⎿  Added 9 lines
+      45      pname = "rakudo-static";
+      46      nativeBuildInputs = [ pkgs.perl pkgs.file pkgs.removeRefere
+          ncesTo ];
+      47      buildInputs = [ ];
+      48 +    # Workaround #2 (diagnostic only): Rakudo insists on buildi
+         +ng                                                             
+      49 +    # dynext/libperl6_ops_moar.so with MoarVM's linker ("cc -st
+         +atic"), which                                                  
+      50 +    # cannot produce a shared object. Link it as an ordinary .s
+         +o (leaving                                                     
+      51 +    # MoarVM symbols undefined) so we can watch the static VM t
+         +ry to dlopen it.                                               
+      52 +    postConfigure = ''                                         
+      53 +      echo "=== before ==="; grep -n -- '-shared.*perl6_ops' Ma
+         +kefile                                                         
+      54 +      sed -i -E '/-shared.*perl6_ops/ { s#\$\(M_LD\)#cc#; s# [^
+         + ]*libmoar\.a##; }' Makefile                                   
+      55 +      echo "=== after ==="; grep -n -- '-shared.*perl6_ops' Mak
+         +efile                                                          
+      56 +    '';                                                        
+      57      postFixup = "";
+      58      disallowedReferences = [ ];
+      59    });
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ The static build dies on first run with a "failed to load library
+  'dynext/libperl6_ops_moar.so'" error, so I'm checking musl's source to see
+  whether dlopen is a deliberate stub in static binaries.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ In a static musl binary, dlopen is a weak stub that always returns NULL, so
+  dynamic loading won't work there. Next I'm checking how much on-disk state a
+  stock Rakudo install needs at runtime.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I have the full picture. Writing it up in task2/RESEARCH.md, with the URL log
+  rule 5 requires.
+
+⏺ Write(RESEARCH.md)
+  ⎿  Wrote 97 lines to RESEARCH.md
+       1 # Task 2 research: why can't Raku be statically compiled?
+       2 
+       3 Versions examined: MoarVM 2025.06, NQP 2025.06.1, Rakudo 2025.06
+         .1 (the
+       4 versions in nixpkgs `cff6bcc0`), musl 1.2.5, target `x86_64-linu
+         x`.
+       5 
+       6 ## Short answer
+       7 
+       8 The VM is not the problem. **MoarVM and NQP both build and run a
+     … +90 lines (~7 KB) (ctrl+o to expand)
+
+⏺ Raku can't be statically compiled because Rakudo's compiler dlopens a small C
+  plugin every time it loads. The VM underneath links statically without
+  trouble. I confirmed this with real static builds on the Linux builder, not
+  just by reading code.
+
+  Where the static build breaks (musl, x86_64-linux, 2025.06 releases):
+  - nixpkgs pkgsStatic.rakudo: fails before building anything. The package
+    assumes Rakudo installs a shared library.
+  - MoarVM (the VM), built with its own --static flag: works. The result is a
+    fully static executable.
+  - NQP (the language Rakudo is written in) on top of it: works, prints hello 
+    from static nqp. One packaging bug needed a fix first: a static MoarVM
+    install ships libmoar.a without its bundled libuv, libtommath, cmp and
+    dyncall archives.
+  - Rakudo: fails in two places.
+    - Its build insists on producing dynext/libperl6_ops_moar.so with the
+      -static linker, which can't make a shared library.
+    - Once I forced that through, the static VM died the first time it ran
+      Rakudo compiler code: failed to load library 
+      'dynext/libperl6_ops_moar.so'.
+
+  Why, in the source:
+  1. Rakudo's Makefile passes
+     --vmlibs=dynext/libperl6_ops_moar.so=Rakudo_ops_init to NQP
+     (rakudo/tools/templates/moar/Makefile.in:99).
+  2. NQP compiles that into loadlib + loadext instructions that run whenever any
+     Rakudo compiler module loads (nqp/src/NQP/World.nqp:490-516).
+  3. loadlib ends up calling dlopen, and a failure is fatal
+     (moarvm/src/core/dll.c:26-31).
+  4. In a static musl binary, dlopen is a deliberate stub that always fails with
+     "Dynamic loading not supported" (musl/src/ldso/dlopen.c).
+
+  The plugin is only about 190 lines of C registering ten Rakudo-specific
+  opcodes (p6captureouters, p6stateinit and so on). Nothing in it needs to be
+  loaded at runtime, so this looks fixable with a patch.
+
+  Secondary issues for initramfs:
+  - raku isn't one file. It's a small launcher that finds and memory-maps 22
+    bytecode files from disk, about 52 MB including a 30 MB core library.
+  - It locates them through /proc/self/exe unless the install paths are compiled
+    in, and /proc may not be mounted early in initramfs.
+  - Your Vixen compiler uses only core Raku: no NativeCall, no modules. So the
+    other use of dlopen (NativeCall, Raku's C FFI) doesn't matter.
+
+  Possible route to S tier (not attempted):
+  1. Link the plugin's C file directly into the static raku launcher.
+  2. Either patch MoarVM so loadlib/loadext find built-in extensions without
+     dlopen, or build Rakudo without --vmlibs and register the opcodes at
+     startup.
+  3. Ship the bytecode tree alongside the binary with compiled-in paths.
+
+  Bytecode is platform-independent, so it can come from a normal dynamic build.
+
+  Other notes:
+  - The prototype gist (the full compiler source) was blocked by a local
+    security hook. Your vixen.md (the blog post) was enough for this question.
+  - Everything is in task2/: the write-up and URL log for rule 5 are in
+    RESEARCH.md, the reproducible build is nix/static-rakudo.nix, and the build
+    logs are in logs/.
+
+  Should I try the patch next, or start comparing other languages for the port?
+
+✻ Sautéed for 38m 1s · done 2:04 PM
+
+❯ Attempt the patch for the S tier                                              
+
+⏺ Plan for the S-tier patch:
+
+  1. MoarVM patch: compile Rakudo's perl6_ops.c into libmoar.a, and add a
+     built-in extension table so loadlib/loadext resolve Rakudo_ops_init without
+     calling dlopen. Putting it in libmoar matters because the static nqp also
+     runs Rakudo compiler code during the build.
+  2. Rakudo: stop building and installing the .so, and link the raku launcher
+     statically.
+  3. Test: run the static raku on a Vixen-style grammar and actions program that
+     also spawns a subprocess (for the Vixen callback).
+  4. Package: wrap it as a flake with nix build and nix flake check, per rule 3.
+
+  Reading the relevant code first.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Rakudo's non-relocatable builds already compile in STATIC_EXEC_PATH, so the
+  launcher won't need /proc; I'm checking how MoarVM's Configure adds optional
+  objects next.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ I have what I need. Writing the MoarVM patch: a --builtin-rakudo-ops=<file>
+  Configure option plus a built-in extension table in dll.c.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Now the dll.c side: a built-in extension table, checked before dlopen.
+
+⏺ Bash(cd /Users/redacted/repos/raku/task2/src/moarvm; python3 - <<'EOF'
+      p='src/core/dll.c'; s=open(p).read()…)
+  ⎿  diff --git a/src/core/dll.c b/src/core/dll.c
+     index 4c8fb65..a409c56 100644
+     --- a/src/core/dll.c
+     … +111 lines (ctrl+o to expand)
+  ⎿  Updated src/moarvm/src/core/dll.c (+54 -3)
+       1  #include "moar.h"
+       2  
+       3 +/* Extensions linked into the executable instead of living in a
+         + shared                                                        
+       4 + * library. A `loadlib` whose file name matches one of these is
+         + satisfied                                                     
+       5 + * without dlopen, which static executables cannot do (musl's s
+         +tatic dlopen                                                   
+       6 + * always fails). The library is then marked with MVM_DLL_BUILT
+         +IN and its                                                     
+       7 + * symbols are looked up here rather than with dlsym. */       
+       8 +#ifdef MVM_BUILTIN_RAKUDO_OPS                                  
+       9 +void Rakudo_ops_init(MVMThreadContext *tc);                    
+      10 +#endif                                                         
+      11 +                                                               
+      12 +typedef struct {                                               
+      13 +    const char *lib;    /* file name without directory or exten
+         +sion */                                                        
+      14 +    const char *sym;                                           
+      15 +    void       *address;                                       
+      16 +} MVMBuiltinExtSym;                                            
+      17 +                                                               
+      18 +static const MVMBuiltinExtSym builtin_syms[] = {               
+      19 +#ifdef MVM_BUILTIN_RAKUDO_OPS                                  
+      20 +    { "libperl6_ops_moar", "Rakudo_ops_init", (void *)Rakudo_op
+         +s_init },                                                      
+      21 +#endif                                                         
+      22 +    { NULL, NULL, NULL }                                       
+      23 +};                                                             
+      24 +                                                               
+      25 +static char builtin_marker;                                    
+      26 +#define MVM_DLL_BUILTIN ((DLLib *)&builtin_marker)             
+      27 +                                                               
+      28 +/* Does the (possibly relative) library path name a builtin lib
+         +rary? */                                                       
+      29 +static int is_builtin_lib(const char *path) {                  
+      30 +    const char *base = strrchr(path, '/');                     
+      31 +    size_t len;                                                
+      32 +    base = base ? base + 1 : path;                             
+      33 +    len  = strcspn(base, ".");                                 
+      34 +    for (const MVMBuiltinExtSym *b = builtin_syms; b->lib; b++)
+      35 +        if (strlen(b->lib) == len && strncmp(base, b->lib, len)
+         + == 0)                                                         
+      36 +            return 1;                                          
+      37 +    return 0;                                                  
+      38 +}                                                              
+      39 +                                                               
+      40 +static void *find_builtin_sym(const char *sym) {               
+     … 40 more lines (ctrl+o to expand)
+  ⎿  Updated src/moarvm/src/core/dll.h (+1 -0)
+       6  
+       7  int MVM_dll_load(MVMThreadContext *tc, MVMString *name, MVMStri
+          ng *path);
+       8  int MVM_dll_free(MVMThreadContext *tc, MVMString *name);
+       9 +void MVM_dll_free_lib(DLLib *lib);                             
+      10  MVMObject * MVM_dll_find_symbol(MVMThreadContext *tc, MVMString
+           *lib, MVMString *sym);
+      11  void MVM_dll_drop_symbol(MVMThreadContext *tc, MVMObject *obj);
+  ⎿  Updated src/moarvm/src/moar.c (+1 -1)
+      639  
+      640  static void free_lib(MVMThreadContext *tc, void *entry_v, void
+            *arg) {
+      641      struct MVMDLLRegistry *entry = entry_v;
+      642 -    MVM_nativecall_free_lib(entry->lib);                      
+      642 +    MVM_dll_free_lib(entry->lib);                             
+      643  }
+      644  
+      645  /* Destroys a VM instance. This must be called only from the m
+           ain thread. It
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both patches are written, and I'm now packaging them as a flake in its own
+  directory, with the big source clones kept out, and swapping the diagnostic
+  hacks for the real patches.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Write(static-raku/default.nix)
+  ⎿  Wrote 68 lines to static-raku/default.nix
+       1 # Fully static Rakudo for Linux: MoarVM -> NQP -> Rakudo, linked
+          against musl.
+       2 #
+       3 # `pkgs` must be a musl package set (pkgsMusl). We reuse the nix
+         pkgs
+       4 # definitions for sources, versions and metadata and change only
+          how they
+       5 # are linked.
+       6 #
+       7 # Stock Rakudo cannot be static because every compiler module ru
+     … +62 lines (~2 KB) (ctrl+o to expand)
+
+⏺ Write(static-raku/flake.nix)
+  ⎿  Wrote 34 lines to static-raku/flake.nix
+       1 {
+       2   description = "Fully static Raku (Rakudo on MoarVM) for Linux,
+          linked against musl";
+       3 
+       4   # Same nixpkgs revision the research was done against (Rakudo 
+         2025.06.1).
+       5   inputs.nixpkgs.url = "github:nixos/nixpkgs/cff6bcc05680cea7406
+         aa1f293d76be9c1483f02";
+       6 
+       7   outputs =
+     … +27 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ I'm writing a cut-down Vixen compiler test program now, then I'll check it
+  with a local Rakudo.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Write(static-raku/tests/vixen-mini.raku)
+  ⎿  Wrote 239 lines to static-raku/tests/vixen-mini.raku
+       1 # Smoke test for a static Raku: a cut-down Vixen expression comp
+         iler in the
+       2 # style of "An expression language for Vixen" (the grammar is co
+         pied
+       3 # verbatim from that post). It exercises what the real compiler 
+         needs:
+       4 # grammars and actions, classes and roles, Set arithmetic, %*ENV
+         , run
+       5 # (calling into Vixen as a subprocess), spurt and chmod.
+       6 
+     … +233 lines (ctrl+o to expand)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The test works under stock Rakudo. One fix: the callVixen line prints a
+  PID-based temp path, so I'm normalising it to make the output comparable
+  against a saved expected-output file.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Now the flake checks: one that the binaries really are static, and one that
+  runs the Vixen test with the static raku.
+
+⏺ Write(static-raku/checks.nix)
+  ⎿  Added 43 lines, removed 1 line
+       1 -{ pkgs, rakudo, nqp, moarvm }: { }                             
+       1 +{                                                              
+       2 +  pkgs,                                                        
+       3 +  rakudo,                                                      
+       4 +  nqp,                                                         
+       5 +  moarvm,                                                      
+       6 +}:                                                             
+       7 +{                                                              
+       8 +  # Every executable is a static ELF with no program interprete
+         +r, and no                                                      
+       9 +  # shared libraries were installed for anything to dlopen.    
+      10 +  static-binaries =                                            
+      11 +    pkgs.runCommand "static-raku-is-static"                    
+      12 +      {                                                        
+      13 +        nativeBuildInputs = [                                  
+      14 +          pkgs.file                                            
+      15 +          pkgs.binutils                                        
+      16 +        ];                                                     
+      17 +      }                                                        
+      18 +      ''                                                       
+      19 +        for exe in ${moarvm}/bin/moar ${nqp}/bin/nqp-m ${rakudo
+         +}/bin/rakudo ${rakudo}/bin/raku; do                            
+      20 +          echo "$exe: $(file -bL "$exe")"                      
+      21 +          file -bL "$exe" | grep -q 'statically linked'        
+      22 +          if readelf -lW "$(readlink -f "$exe")" | grep -q INTE
+         +RP; then                                                       
+      23 +            echo "$exe has a program interpreter" >&2          
+      24 +            exit 1                                             
+      25 +          fi                                                   
+      26 +        done                                                   
+      27 +        if find -L ${moarvm} ${nqp} ${rakudo} -name '*.so*' | g
+         +rep .; then                                                    
+      28 +          echo "shared libraries were installed" >&2           
+      29 +          exit 1                                               
+      30 +        fi                                                     
+      31 +        touch $out                                             
+      32 +      '';                                                      
+      33 +                                                               
+      34 +  # The cut-down Vixen compiler runs on the static raku with an
+         + empty                                                         
+      35 +  # environment, including the subprocess calls back into "Vixe
+         +n".                                                            
+      36 +  vixen-mini = pkgs.runCommand "static-raku-vixen-mini" { } '' 
+      37 +    export HOME=$TMPDIR                                        
+      38 +    env -i HOME=$HOME TMPDIR=$TMPDIR \                         
+      39 +      ${rakudo}/bin/raku ${./tests/vixen-mini.raku} > actual   
+      40 +    diff -u ${./tests/vixen-mini.expected} actual              
+      41 +    touch $out                                                 
+      42 +  '';                                                          
+      43 +}                                                              
+
+⏺ Status so far:
+  - Patches written: the MoarVM built-in extension table (78 lines) and the
+    Rakudo change that stops building and installing the dynext library.
+  - Flake set up in task2/static-raku/ with packages and checks.
+  - Test program ready: a cut-down Vixen compiler (the blog grammar verbatim,
+    plus run, spurt, chmod and Set). It passes on stock Rakudo and its expected
+    output is recorded.
+
+  The patched static MoarVM, NQP and Rakudo build is running on the Linux
+  builder. I'll pick up when it finishes.
+
+✻ Crunched for 5m 54s · done 2:12 PM
+
+※ recap: I'm going for S tier by making Raku itself build as a fully static musl binary; the patched MoarVM, NQP and Rakudo are building on the Linux builder now. Next, I'll check the build result, then run the static and Vixen checks with `nix flake check`. (disable recaps in /config)
+
+⏺ Background command "Build patched static Rakudo via the flake" completed (exit
+code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The build log's exit=0 came from my trailing echo, since the build actually
+  failed in NQP's test suite: 143 of 144 files pass, and t/nativecall/01-basic.t
+  segfaults. I'm looking into why it crashes rather than failing cleanly.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ Theory: the musl stub fails dlopen(NULL) during the native call, and the
+  fallback to msvcrt.dll fails too, so the crash sits in the error path. I'm
+  reproducing it on the builder with the earlier static NQP to confirm.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ That's probably building gdb from source for musl. Stopping it and using the
+  cached glibc gdb, which can debug static binaries just as well.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Background command "Show repro build errors" failed with exit code 144
+
+⏺ The repro failed for two reasons: the NQP store path was a bare literal
+  missing from the sandbox, and gdb can't ptrace under the emulated x86_64
+  builder. I've dropped gdb and fixed the path, and I'm narrowing down the crash
+  step by step.
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ With static musl, buildnativecall fails cleanly, and the segfault comes from
+  the test calling the broken native-call object, a pre-existing MoarVM bug
+  rather than my patch. I'll skip that NQP test with a comment, since NativeCall
+  needs dlopen and Vixen doesn't use it.
+
+⏺ Update(static-raku/default.nix)
+  ⎿  Added 6 lines
+      46      pname = "nqp-static";
+      47      buildInputs = [ ];
+      48      nativeBuildInputs = [ pkgs.perl ];
+      49 +    # NativeCall needs dlopen, which a static executable doesn'
+         +t have:                                                        
+      50 +    # buildnativecall fails with "Dynamic loading not supported
+         +", and this                                                    
+      51 +    # test then calls the unbuilt function anyway and segfaults
+         +.                                                              
+      52 +    preCheck = ''                                              
+      53 +      rm t/nativecall/01-basic.t                               
+      54 +    '';                                                        
+      55    });
+      56  
+      57    rakudo = (upstream.rakudo.override { inherit nqp; }).override
+          Attrs (old: {
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ NQP's tests passed apart from that NativeCall case. The rebuild of NQP and
+  Rakudo with the patches is running in the background. The important point is
+  whether the static VM gets past the BOOTSTRAP/v6c stage where it died before.
+
+✻ Churned for 28m 4s · done 2:46 PM
+
+※ recap: Goal: get a fully static Raku binary for S tier on Task 2. I've patched MoarVM and Rakudo to build in the ops library that previously needed `dlopen`, and the patched static Rakudo build is now running on the Linux builder. (disable recaps in /config)
+
+⏺ Background command "Rebuild static NQP and Rakudo via the flake" completed
+(exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The static toolchain now gets past BOOTSTRAP/v6c, compiles the core library,
+  and runs hello-world, with NQP's suite passing. Next I'm running nix flake
+  check.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All four binaries are statically linked. The "shared library" the check
+  flagged is a false positive: libmoar.so-gdb.py, a gdb helper script.
+  Tightening the pattern and re-running both checks.
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both x86_64 checks pass, with the static binaries and the Vixen examples
+  matching the reference. I'm starting the aarch64 build of the static chain
+  next, then a QEMU boot test with a Raku /init to prove it works in an
+  initramfs.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ makeInitrd copies each entry's full closure, so I'm now writing the boot
+  check, which runs /init as a Raku script on the static raku under QEMU with
+  KVM when available.
+
+  Read 1 file, ran 1 shell command (ctrl+o to expand)
+
+⏺ It evaluates. Running the boot test on x86_64 first, since those packages are
+  already built. It may fall back to slow emulation there.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Two jobs are running on the builder: the aarch64 static build and the x86_64
+  initramfs boot test. I'll write up once both report back.
+
+✻ Worked for 2m 17s · done 2:52 PM
+
+⏺ Background command "Run initramfs boot check on x86_64" completed (exit code
+0)
+
+  Searched for 2 patterns, ran 1 shell command (ctrl+o to expand)
+
+⏺ The static raku ran as PID 1 in an x86_64 initramfs and printed vixen-mini 
+  PASS, with the subsequent kernel panic expected when /init exits cleanly. I'm
+  checking the initramfs size next.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both work, but the closure is bloated: 257 MiB, and the compressed initrd is
+  66 MB. The static raku drags in Perl, bash, coreutils, a dynamic musl and even
+  the Rakudo source tree. Finding out why:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Stale Perl and Rakudo references and extra launcher variants are bloating the
+  closure, so I'm checking Rakudo's Configure for a self-contained layout.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Background command "Build static Rakudo for aarch64-linux" completed (exit
+code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ aarch64 works too: NQP's suite passes and the static raku runs. Now the
+  slimming. Reading how Rakudo handles a separate --nqp-home:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ NQP's install path is fixed at its own build, so Rakudo's Configure can't
+  share one. The runner's C file takes the paths as defines, so I'm checking
+  whether a slim bundle can simply recompile it.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The raku bundle will ship only the runtime bytecode and the recompiled runner,
+  with no references to Perl, bash, sources, headers or libmoar.a. I'm checking
+  the runner's compile flags next.
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ I'll take the exact compiler flags from NQP's own --show-config at build time
+  rather than copying them by hand, so the recompiled runner matches the MoarVM
+  build. Writing the bundle derivation:
+
+⏺ Update(static-raku/default.nix)
+  ⎿  Added 69 lines
+       71        runHook postInstallCheck
+       72      '';
+       73    });
+       74 +                                                              
+       75 +  # Just what is needed to run Raku, for initramfs: one static
+          + `raku` plus                                                  
+       76 +  # the NQP and Rakudo bytecode, with no references to other s
+          +tore paths.                                                   
+       77 +  # The `rakudo` closure, by contrast, drags in Perl, bash, so
+          +urces and                                                     
+       78 +  # libmoar.a via configure strings, wrapper scripts and NQP's
+          + MAST symlinks.                                               
+       79 +  #                                                           
+       80 +  # The C runner finds its bytecode through paths compiled in 
+          +with -D, so we                                                
+       81 +  # recompile it (one file) against this output's own layout. 
+       82 +  raku = pkgs.stdenv.mkDerivation {                           
+       83 +    pname = "raku-static";                                    
+       84 +    inherit (rakudo) version;                                 
+       85 +    src = rakudo.src;                                         
+       86 +    nativeBuildInputs = [ pkgs.removeReferencesTo ];          
+       87 +    dontConfigure = true;                                     
+       88 +                                                              
+       89 +    buildPhase = ''                                           
+       90 +      runHook preBuild                                        
+       91 +      moarConfig() { ${nqp}/bin/nqp --show-config | sed -n "s/
+          +^moar::$1=//p"; }                                             
+       92 +      cc -static $(moarConfig cflags) \                       
+       93 +        -DSTATIC_EXEC_PATH="\"$out/bin/raku\"" \              
+       94 +        -DSTATIC_NQP_HOME="\"$out/share/nqp\"" \              
+       95 +        -DSTATIC_RAKUDO_HOME="\"$out/share/perl6\"" \         
+       96 +        ${pkgs.lib.concatMapStringsSep " " (d: "-I${moarvm}/in
+          +clude/${d}") [                                                
+       97 +          "moar"                                              
+       98 +          "libuv"                                             
+       99 +          "libtommath"                                        
+      100 +          "dyncall"                                           
+      101 +          "mimalloc"                                          
+      102 +        ]} \                                                  
+      103 +        -o raku src/vm/moar/runner/main.c ${moarvm}/lib/libmoa
+          +r.a $(moarConfig ldlibs)                                      
+      104 +      runHook postBuild                                       
+      105 +    '';                                                       
+      106 +                                                              
+      107 +    installPhase = ''                                         
+      108 +      runHook preInstall                                      
+      109 +      install -Dm755 raku $out/bin/raku                       
+      110 +      mkdir -p $out/share/nqp/lib $out/share/perl6/runtime    
+      111 +      cp ${nqp}/share/nqp/lib/*.moarvm $out/share/nqp/lib/    
+      112 +      cp -r ${rakudo}/share/perl6/{lib,core,site,vendor} $out/
+          +share/perl6/                                                  
+      113 +      cp ${rakudo}/share/perl6/runtime/*.moarvm $out/share/per
+          +l6/runtime/                                                   
+      114 +      rm $out/share/perl6/runtime/*debug*                     
+      115 +      chmod -R u+w $out/share                                 
+      116 +      runHook postInstall                                     
+      117 +    '';                                                       
+      118 +                                                              
+      119 +    # The only store paths left are in MoarVM's build configur
+          +ation strings,                                                
+      120 +    # which are informational ($*VM.config) and never opened. 
+      121 +    postFixup = ''                                            
+      122 +      remove-references-to ${pkgs.lib.concatMapStringsSep " " 
+          +(p: "-t ${p}") [                                              
+      123 +        moarvm                                                
+      124 +        nqp                                                   
+      125 +        rakudo                                                
+      126 +        rakudo.src                                            
+      127 +        pkgs.perl                                             
+      128 +      ]} $out/bin/raku                                        
+      129 +    '';                                                       
+      130 +    disallowedReferences = [                                  
+      131 +      moarvm                                                  
+      132 +      nqp                                                     
+      133 +      rakudo                                                  
+      134 +      pkgs.perl                                               
+      135 +      pkgs.bash                                               
+      136 +    ];                                                        
+      137 +                                                              
+      138 +    doInstallCheck = true;                                    
+      139 +    installCheckPhase = ''                                    
+      140 +      $out/bin/raku -e 'say "hello from slim static raku"'    
+      141 +    '';                                                       
+      142 +  };                                                          
+      143  }
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The runner wraps these defines in its own STRINGIFY macro, so it wants bare
+  paths. I passed quoted strings, which leaves literal quote characters in the
+  path. Fixing:
+
+  Ran 2 shell commands (ctrl+o to expand)
+
+⏺ The slim runner works (hello from slim static raku). The Nix check correctly
+  caught that some files still mention the NQP, MoarVM and Perl store paths.
+  Finding which files:
+
+  Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+⏺ That's hung with no output, probably stuck on evaluation. Killing it and using
+  direct store paths instead.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Background command "Locate store-path references inside bytecode files" failed
+with exit code 144
+
+⏺ The leftover mentions in the bytecode are source paths in backtraces,
+  build-config values and the site/vendor config files. I'll scrub them with
+  Nix's remove-references-to, since it keeps byte lengths and the initramfs boot
+  will catch any path that still gets opened.
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ The slim bundle builds, passes the reference checks, and still prints hello
+  after scrubbing (Nix runs the install check after fixup). Its closure:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ The bundle is now 69.5 MiB with no references to other store paths, down from
+  257 MiB. I'm making it the flake's default package and pointing the checks at
+  it so the initramfs boot runs with only the bundle and busybox.
+
+  Ran 3 shell commands (ctrl+o to expand)
+
+⏺ While nix flake check runs across both architectures, I'm writing the README
+  for the flake.
+
+⏺ Write(static-raku/README.md)
+  ⎿  Wrote 57 lines to static-raku/README.md
+       1 # Static Raku
+       2 
+       3 Fully static Raku (Rakudo 2025.06.1 on MoarVM 2025.06) for Linux
+         , linked
+       4 against musl, for use in an initramfs. Builds on `x86_64-linux` 
+         and
+       5 `aarch64-linux`.
+       6 
+       7 ```
+       8 nix build            # slim bundle: bin/raku + bytecode, 70 MiB,
+     … +50 lines (~3 KB) (ctrl+o to expand)
+
+⏺ Background command "Format Nix files and run full flake check on both systems"
+completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ nix flake check passed, but on this Mac it only evaluated the Linux outputs
+  and built the host checks. I'm now building all six Linux checks explicitly so
+  they actually run.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Meanwhile, removing a README claim I haven't verified (module precompilation
+  behaviour):
+
+⏺ Update(static-raku/README.md)
+  ⎿  Removed 2 lines
+      39    "Dynamic loading not supported". NQP's `t/nativecall/01-basic
+          .t` is
+      40    skipped because it calls the unbuilt function anyway and segf
+          aults. That's
+      41    a pre-existing MoarVM bug, not something this patch introduce
+          d.
+      42 -- Modules can't be precompiled into the read-only store at runt
+         -ime. Core                                                      
+      43 -  modules come precompiled; others need a writable `$HOME` or `
+         -RAKUDOLIB`.                                                    
+      42  - `raku` is one static executable plus about 62 MiB of bytecode
+           in
+      43    `share/`, not a single file. MoarVM can load bytecode from me
+          mory
+      44    (`MVM_cu_from_bytes`), so embedding it in the ELF is possible
+           future work.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Update(static-raku/default.nix)
+  ⎿  Added 3 lines, removed 2 lines
+      77    # The `rakudo` closure, by contrast, drags in Perl, bash, sou
+          rces and
+      78    # libmoar.a via configure strings, wrapper scripts and NQP's 
+          MAST symlinks.
+      79    #
+      80 -  # The C runner finds its bytecode through paths compiled in w
+         -ith -D, so we                                                  
+      81 -  # recompile it (one file) against this output's own layout.  
+      80 +  # The C runner finds its bytecode through paths compiled in w
+         +ith -D (bare;                                                  
+      81 +  # main.c stringifies them), so we recompile that one file aga
+         +inst this                                                      
+      82 +  # output's own layout.                                       
+      83    raku = pkgs.stdenv.mkDerivation {
+      84      pname = "raku-static";
+      85      inherit (rakudo) version;
+
+⏺ Waiting on the six Linux checks. The aarch64 ones need the aarch64 bundle and
+  busybox built first.
+
+✻ Brewed for 16m 30s · done 3:11 PM
+
+⏺ Background command "Build all six checks on both Linux architectures"
+completed (exit code 0)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ All six checks pass. Pulling the boot output from both architectures:
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Both architectures boot. The initrd is now 17.9 MB compressed, down from 66
+  MB. Last step: updating RESEARCH.md so it records the result rather than the
+  proposed route.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Raku can now be statically compiled and linked (S tier). On both x86_64-linux
+  and aarch64-linux, a static raku boots as PID 1 in a bare initramfs and runs a
+  cut-down Vixen compiler correctly. It's not yet verified with your real
+  compiler, because I still don't have its full source.
+
+  The fix
+  - MoarVM patch (78 changed lines): adds a new Configure flag,
+    --builtin-rakudo-ops, which compiles Rakudo's ten extra opcodes into libmoar
+    itself. It also adds a small table of built-in extensions to dll.c, so
+    Rakudo's loadlib/loadext resolve Rakudo_ops_init without dlopen. Without the
+    flag, MoarVM behaves exactly as before.
+    - The opcodes have to live in libmoar rather than the raku launcher, because
+      the static nqp also runs Rakudo compiler code during the build.
+  - Rakudo patch (small): stops building and installing libperl6_ops_moar.so.
+  - Nix packaging: builds MoarVM with --static and folds its bundled libraries
+    (libuv, libtommath, cmp, dyncall) into libmoar.a, which upstream omits. NQP
+    and Rakudo build on top.
+  - Default package: a slim raku bundle with one static executable plus the
+    bytecode. It's 69.5 MiB and references no other store paths, versus 257 MiB
+    for the full install, which pulled in Perl, bash and source trees.
+
+  What I ran on the Linux builder (all six checks pass)
+  - NQP's test suite: 13,469 tests pass. I skipped one NativeCall test:
+    NativeCall needs dlopen, so it fails with "Dynamic loading not supported",
+    and that test then crashes on an older MoarVM bug.
+  - static-binaries: moar, nqp-m, rakudo and raku are all static, with no
+    dynamic loader.
+  - vixen-mini: I wrote this test program, a cut-down compiler using your blog
+    grammar verbatim plus actions, Set name analysis, execline output and
+    callVixen via run. It gives the expected output on the static raku.
+  - initramfs-boot: QEMU boots a kernel whose initramfs contains only the raku
+    bundle and a static busybox (for the /bin/sh callbacks), with a Raku script
+    as /init. It prints Rakudo 2025.06.1, PID 1, /proc mounted? False,
+    vixen-mini PASS. The compressed initrd is 17.9 MB.
+
+  Caveats
+  - NativeCall can't work without dlopen. Your compiler doesn't use it.
+  - It's one static binary plus 62 MiB of bytecode in share/, not a single file.
+    Embedding the bytecode in the executable looks possible but isn't done.
+  - On your Mac, nix flake check only evaluates the Linux checks; I built all
+    six explicitly on the builder. The QEMU boots ran without hardware
+    acceleration because the sandbox had no usable KVM. They're still quick:
+    about 17 seconds on aarch64, 53 seconds on x86_64.
+  - The MoarVM and Rakudo clones in task2/src/ still have my edits in their
+    working trees. The patch files in static-raku/patches/ are the canonical
+    copies.
+
+  Everything is in task2/static-raku/: nix build gives the slim bundle, and its
+  README.md explains the layout. RESEARCH.md has the root-cause trace and the
+  URL log, and the build logs are in task2/logs/.
+
+  The best next step is running your real compiler on the static raku. If you
+  drop the full .raku file into task2/ref/, I'll add it as a check alongside
+  vixen-mini.
+
+✻ Baked for 54s · done 3:13 PM
+
+※ recap: Goal: S tier on Task 2 by making Raku statically linkable for your initramfs; that's done and all six checks pass on x86_64 and aarch64. Next, drop your full Vixen compiler into task2/ref/ so I can test it on the static raku. (disable recaps in /config)

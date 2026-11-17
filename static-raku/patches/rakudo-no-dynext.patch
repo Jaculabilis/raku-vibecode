@@ -1,0 +1,26 @@
+diff --git a/tools/templates/moar/Makefile.in b/tools/templates/moar/Makefile.in
+index d0cb3b4..90c9c2d 100644
+--- a/tools/templates/moar/Makefile.in
++++ b/tools/templates/moar/Makefile.in
+@@ -94,7 +94,10 @@ MOAR        = @nfpq(@moar::bindir@/moar@moar::exe@)@
+   rakudo@moar::exe@ \
+   perl6@moar::exe@
+ 
+-@bpv(RAKUDO_OPS_EXTRA)@ = @bpm(RAKUDO_OPS_DLL)@
++# The extension ops are compiled into libmoar (MoarVM's
++# --builtin-rakudo-ops), so no dynext/ shared library is built or installed.
++# The --vmlibs path below is now only the key MoarVM matches on.
++@bpv(RAKUDO_OPS_EXTRA)@ =
+ 
+ @bpv(NQP_FLAGS_EXTRA)@ = --vmlibs=@bpm(RAKUDO_OPS_DLL)@=Rakudo_ops_init
+ 
+@@ -240,8 +243,7 @@ MOAR        = @nfpq(@moar::bindir@/moar@moar::exe@)@
+ 	$(NOECHO)@bpm(RUN_CLEAN_TARGET_FILES)@ @nfpq($(DESTDIR)$(RAKUDO_HOME)/runtime)@ @for_specs($(SETTING_@ucspec@_MOAR) )@
+ 	$(NOECHO)@bpm(RUN_CLEAN_TARGET_FILES)@ @nfpq($(DESTDIR)$(PREFIX)/bin)@ @bsm(RAKUDO)@ @bsm(RAKUDO_DEBUG)@ @bsm(PERL6)@ @bsm(PERL6_DEBUG)@
+ 
+-@backend_prefix@-install-main:: @@bpm(RAKUDO_OPS_DLL)@@ @for_langalias(@@bpm(INST_@uclangalias@_M)@@ @@bpm(INST_@uclangalias@_DEBUG_M)@@ @if(platform==windows @@bpm(INST_@uclangalias@W_M)@@ )@)@
+-	$(NOECHO)$(CP) @bpm(RAKUDO_OPS_DLL)@ @nfpq($(DESTDIR)$(RAKUDO_HOME)/runtime/dynext)@
++@backend_prefix@-install-main:: @for_langalias(@@bpm(INST_@uclangalias@_M)@@ @@bpm(INST_@uclangalias@_DEBUG_M)@@ @if(platform==windows @@bpm(INST_@uclangalias@W_M)@@ )@)@
+ @for_langalias(
+ 	$(NOECHO)$(CP) @bpm(INST_@uclangalias@_M)@ @nfpq($(DESTDIR)$(PREFIX)/bin/@bpm(@uclangalias@_M)@)@
+ 	$(NOECHO)$(CP) @bpm(INST_@uclangalias@_DEBUG_M)@ @nfpq($(DESTDIR)$(PREFIX)/bin/@bpm(@uclangalias@_DEBUG_M)@)@
