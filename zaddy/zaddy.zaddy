@@ -1,0 +1,1231 @@
+-- Zaddy, described in Zaddy.
+--
+-- Compiled by any Zaddy compiler, this file yields an RPython program which
+-- compiles Zaddy programs to RPython programs.  Compiled by itself, it yields
+-- rzaddy/zaddy.py exactly.  See doc/zaddy.md for the language reference.
+--
+-- Algebras:
+--   py      indented Python source, lowered to builtin lines and blocks
+--   peg     parsing expressions, lowered to py statements
+--   zephyr  signatures, lowered to py classes with one method per constructor
+--   rules   patterns and productions, lowered to Python expressions
+--   char    character classes, lowered to Python boolean expressions
+
+.signature py
+
+statement = Statement(string line)
+          | Imp(string module, string names)
+          | Ret(string expr)
+          | RaiseIf(string test)
+          | ContIf(string test)
+          | Compound(string head, statement* block)
+          | Conditional(string test, statement* block)
+          | Handler(statement* block, statement* handler)
+
+.signature peg
+
+pattern = NamePatt(string name)
+
+expr = Null
+     | Token(string s)
+     | Call(string s)
+     | Sequence(expr* exprs)
+     | Choice(expr this, expr that)
+     | Any(expr expr)
+     | Some(expr expr)
+     | Maybe(expr expr)
+     | Positive(expr expr)
+     | Negative(expr expr)
+     | Capture(expr expr, pattern patt)
+     | Production(expr expr, prod prod)
+
+.signature zephyr
+
+signature = Signature(string name, type* tys)
+type = Product(string name, field* fs)
+     | Sum(string name, string* attrs, constructor con, constructor* cons)
+constructor = Con(string tag, field* args, string kind)
+field = Id(string ty, string name)
+      | Option(string ty, string name)
+      | Sequence(string ty, string name)
+
+.signature rules
+
+patt = IgnorePatt
+     | VarPatt(string n)
+     | SplicePatt(string n)
+     | StrPatt(string s)
+     | StructPatt(string ns, string func, patt* vars)
+     | ListPatt(patt* ps)
+production = VarProd(string name)
+           | ConstProd(string name)
+           | StrProd(string s)
+           | CharProd(int n)
+           | StructProd(string ns, string func, production* ps)
+           | ListProd(production* ps)
+           | SpliceListProd(production* items)
+           | ItemProd(production p)
+           | SpliceProd(string name)
+           | FlattenOp(production p)
+           | LengthOp(production p)
+           | JoinOp(string s, production p)
+           | ConcatOp(production p, production* ps)
+           | GenSym(string s)
+rule = Rewrite(string name, patt root, production* prods, string simplify)
+     | Let(string name, production p)
+
+.signature char
+
+set = Any
+    | Exactly(char c)
+    | Range(set l, set u)
+    | Call(string n)
+    | Complement(set s)
+    | Either(set l, set r)
+
+.rules
+
+-- Lowering the py algebra to the builtin line/block algebra.  Sugar is
+-- rewritten into other py constructors; nested list patterns keep the rules
+-- for empty and non-empty blocks disjoint.
+
+pyImp       @ py.Imp(M, Ns)  ==> py.Statement('from ' M ' import ' Ns) ;
+pyRet       @ py.Ret(E)      ==> py.Statement('return ' E) ;
+pyRaiseIf   @ py.RaiseIf(T)  ==> py.Statement('if ' T ': raise ParseError("no reason")') ;
+pyContIf    @ py.ContIf(T)   ==> py.Statement('if ' T ': continue') ;
+pyStatement @ py.Statement(L) ==> [.line(L)] ;
+pyCompPass  @ py.Compound(H, [])          ==> [.line(H ': pass')] ;
+pyCompBlock @ py.Compound(H, [S, Ss…])    ==> [.line(H ':'), .block(*[S, Ss…])] ;
+pyCondEmpty @ py.Conditional(T, [])       ==> [] ;
+pyCondBlock @ py.Conditional(T, [S, Ss…]) ==> [.line('if ' T ':'), .block(*[S, Ss…])] ;
+pyHandEmpty @ py.Handler(B, [])           ==> [] ;
+pyHandBlock @ py.Handler(B, [S, Ss…])     ==> [.line('try:'), .block(*B),
+                                               .line('except ParseError as pe:'), .block(*[S, Ss…])] ;
+
+
+-- Packrat parsing.  Each rule becomes a method returning (position, value);
+-- choice and repetition save positions on a stack and backtrack on ParseError.
+
+pegNamePatt  @ peg.NamePatt(Name) ==> 'env.set(u"' Name '", rv)' ;
+
+let save       := py.Statement('st.append(i)') ;
+let backup     := py.Statement('i = st.pop()') ;
+let boundcheck := py.RaiseIf('i >= len(self.s)') ;
+let skipws     := py.Statement('while i < len(self.s) and ord(self.s[i]) in [9, 10, 13, 32]: i += 1') ;
+
+pegSeq      @ peg.Sequence(Es)     ==> *Es ;
+pegCap      @ peg.Capture(E, P)    ==> [E…, py.Statement(P)] ;
+pegProd     @ peg.Production(E, P) ==> [E…, py.Statement('rv = ' P)] ;
+pegCall     @ peg.Call(S)          ==> [py.Statement('i, rv = self.parse' S '(i)')] ;
+pegChoice   @ peg.Choice(L, R)     ==> [save, py.Handler(L, [backup, R…])] ;
+pegToken    @ peg.Token(S)         ==> [skipws, boundcheck,
+                                        py.Statement('assert i >= 0'),
+                                        py.RaiseIf('self.s[i:i + ' #S '] != u"' S '"'),
+                                        py.Statement('self.lastMatch.append((u"TOKEN ' S '", i, i + ' #S '))'),
+                                        py.Statement('rv = self.uf.makeStr(u"' S '"); i += ' #S)] ;
+pegAny      @ peg.Any(E)           ==> [py.Statement('rvs = []'),
+                                        py.Compound('while True',
+                                            [save,
+                                             py.Handler([E…, py.Statement('rvs.append(rv)')],
+                                                        [backup, py.Statement('break')])]),
+                                        py.Statement('rv = rel.uf.makeList(rvs)')] ;
+pegSome     @ peg.Some(E)          ==> *[peg.Any(E), [py.RaiseIf('not len(rvs)')]] ;
+
+pegMaybe    @ peg.Maybe(E)         ==> [save, py.Handler(E, [py.Statement('rv = 0'), backup])] ;
+pegPos      @ peg.Positive(E)      ==> [save,
+                                        py.Handler([E…, py.Statement('rv = True')],
+                                                   [py.Statement('rv = False')]),
+                                        backup,
+                                        py.RaiseIf('not rv')] ;
+pegNeg      @ peg.Negative(E)      ==> [save,
+                                        py.Handler([E…, py.Statement('rv = True')],
+                                                   [py.Statement('rv = False')]),
+                                        backup,
+                                        py.RaiseIf('rv')] ;
+
+
+-- Signatures become classes whose makeCon methods intern e-nodes.  The
+-- constructor kind is 0 (free), 1 (.comm), 2 (.assoc) or 3 (.ac).
+
+zSig    @ zephyr.Signature(N, T)    ==> [py.Compound('class ' N 'Rels(object)', *[[
+                                             py.Statement('ns = u"' N '"'),
+                                             py.Statement('def __init__(self, uf): self.uf = uf')
+                                         ], *T]),
+                                         py.Statement('allRels.append(("' N '", ' N 'Rels))')] ;
+zProd   @ zephyr.Product(N, Fs)     ==> [py.Statement('# product ' N)] ;
+zSum    @ zephyr.Sum(N, A, C, Cs)   ==> *[C, *Cs] ;
+zConF   @ zephyr.Con(T, A, K)       ==> [py.Statement('def make' T '(self, ' .join(A, ', ') '): return self.uf.struct(self.ns, u"' T '", ' K ', [' .join(A, ', ') '])')] ;
+zOpt    @ zephyr.Option(T, N)       ==> N ;
+zSeq    @ zephyr.Sequence(T, N)     ==> N ;
+zId     @ zephyr.Id(T, N)           ==> N ;
+
+
+-- Character classes.
+
+charAny     @ char.Any           ==> 'True' ;
+charExactly @ char.Exactly(C)    ==> 'c == ' C ;
+charRange   @ char.Range(L, U)   ==> L ' <= c <= ' U ;
+charCall    @ char.Call(N)       ==> 'self.cls' N '(c)' ;
+charComp    @ char.Complement(S) ==> 'not (' S ')' ;
+charEither  @ char.Either(L, R)  ==> '(' L ') or (' R ')' ;
+
+
+-- Rules.  Patterns become matcher objects built at import time; productions
+-- become expressions which intern e-nodes, reading pattern variables from env.
+
+rPattIg @ rules.IgnorePatt                 ==> 'PIgnore()' ;
+rPattV  @ rules.VarPatt(N)                 ==> 'PVar(u"' N '")' ;
+rPattSp @ rules.SplicePatt(N)              ==> 'PSplice(u"' N '")' ;
+rPattS  @ rules.StrPatt(S)                 ==> 'PStr(u' 39 S 39 ')' ;
+rPattSt @ rules.StructPatt(Ns, F, Ps)      ==> 'PStruct(u"' Ns '", u"' F '", [' .join(Ps, ', ') '])' ;
+rPattL  @ rules.ListPatt(Ps)               ==> 'PList([' .join(Ps, ', ') '])' ;
+rProdV  @ rules.VarProd(Name)              ==> 'env.get(u"' Name '")' ;
+rProdC  @ rules.ConstProd(Name)            ==> 'rel.const' Name ;
+rProdS  @ rules.StrProd(S)                 ==> 'uf.makeStr(u' 39 S 39 ')' ;
+rProdCh @ rules.CharProd(N)                ==> 'uf.makeStr(unichr(' N '))' ;
+rProdSt @ rules.StructProd(Ns, F, Ps)      ==> 'rel.' Ns '.make' F '(' .join(Ps, ', ') ')' ;
+rProdL  @ rules.ListProd(Ps)               ==> 'uf.makeList([' .join(Ps, ', ') '])' ;
+rProdSL @ rules.SpliceListProd(Is)         ==> 'uf.makeList([]' .join(Is, '') ')' ;
+rProdI  @ rules.ItemProd(P)                ==> ' + [' P ']' ;
+rProdSp @ rules.SpliceProd(N)              ==> ' + env.elems(u"' N '")' ;
+rProdOF @ rules.FlattenOp(P)               ==> 'rel.builtin.makeFlatten(' P ')' ;
+rProdOL @ rules.LengthOp(P)                ==> 'rel.builtin.makeLength(' P ')' ;
+rProdOJ @ rules.JoinOp(S, P)               ==> 'rel.builtin.makeJoin(uf.makeStr(u"' S '"), ' P ')' ;
+rProdOC @ rules.ConcatOp(P, Ps)            ==> 'rel.builtin.makeConcat(' P ', uf.makeList([' .join(Ps, ', ') ']))' ;
+rGenSym @ rules.GenSym(S)                  ==> 'uf.makeStr(rel.gensym(u"' S '"))' ;
+rRule   @ rules.Rewrite(Name, Pat, Ps, K)  ==> [py.Compound('def rhs' Name '(uf, rel, env)', [
+                                                    py.Ret('[' .join(Ps, ', ') ']')
+                                                ]),
+                                                py.Statement('ruleList.append(Rule("' Name '", ' Pat ', rhs' Name ', ' K '))')] ;
+rLet    @ rules.Let(Name, P)               ==> [py.Statement('@let'),
+                                                py.Statement('def let' Name '(uf, rel): rel.const' Name ' = ' P)] ;
+
+.grammar ZADDY
+
+-- The grammar of Zaddy itself.  The start rule ZADDY wraps the translated
+-- sections in the runtime, which is written below as py terms.
+
+class Whitespace = 9 | 10 | 13 | 32 ;
+class Digit = .range(48:57) ;
+class Upper = .range(65:90) ;
+class Lower = .range(97:122) ;
+class Alpha = Upper | Lower ;
+class Alphanumeric = Alpha | Digit ;
+class Quote = 39 ;
+class Quoted = ~( 10 | 13 | 39 ) ;
+class Ellipsis = 8230 ;
+class NotNewline = ~( 10 ) ;
+
+token WS = Whitespace* ;
+token Number = Digit+ ;
+token Id = Alpha Alphanumeric* ;
+token PVar = Upper Alphanumeric* ;
+token PConst = Lower+ ;
+token ZTId = Lower Alphanumeric* ;
+token ZCId = Upper Alphanumeric* ;
+token Quote = Quote ;
+token Quoted = Quoted* ;
+token Ellipsis = Ellipsis ;
+token CommentText = NotNewline* ;
+
+STRING := WS Quote Quoted:Q Quote -> Q ;
+ID := WS Id ;
+DOTS := Ellipsis / '...' ;
+COMMENT := '--' CommentText -> [] ;
+
+SIGNATURE := '.signature' ID:Name ( ZTY / COMMENT )*:Tys -> zephyr.Signature(Name, *Tys) ;
+ZTY := ID:Name '='
+      ( FIELDS:Fs -> [zephyr.Product(Name, Fs)]
+        / ZCON:Con ( '|' ZCON )*:Cons
+          ( 'attributes' FIELDS:Attrs -> [zephyr.Sum(Name, Attrs, Con, Cons)]
+          / -> [zephyr.Sum(Name, [], Con, Cons)] ) ) ;
+ZCON := WS ( ZCId:Tag FIELDS:Args ZKIND:K -> zephyr.Con(Tag, Args, K)
+           / ZCId:Tag ZKIND:K -> zephyr.Con(Tag, [], K) ) ;
+ZKIND := '.comm' -> '1'
+       / '.assoc' -> '2'
+       / '.ac' -> '3'
+       / -> '0' ;
+FIELDS := '(' FIELD:F ( ',' FIELD )*:Fs ')' -> *[[F], Fs] ;
+FIELD := WS ( ZTId:Ty '?' ID:Name -> zephyr.Option(Ty, Name)
+            / ZTId:Ty '*' ID:Name -> zephyr.Sequence(Ty, Name)
+            / ZTId:Ty ID:Name     -> zephyr.Id(Ty, Name) ) ;
+
+RULES := '.rules' ( CHRULE / CHLET / COMMENT )*:Hs -> *Hs ;
+CHRULE := ID:Name '@' WS CPATT:Root
+          ( '==>' CPRODS:Prods ';' -> rules.Rewrite(Name, Root, Prods, '0')
+          / '<=>' CPRODS:Prods ';' -> rules.Rewrite(Name, Root, Prods, '1') ) ;
+CHLET := 'let' ID:Name ':=' CPROD1:P ';' -> rules.Let(Name, P) ;
+CPATTS := WS CPATT:P ( ',' WS CPATT )*:Ps -> *[[P], Ps] ;
+PITEM := WS PVar:N DOTS -> rules.SplicePatt(N)
+       / WS CPATT ;
+PITEMS := PITEM:P ( ',' PITEM )*:Ps -> *[[P], Ps] ;
+CPATT := '_'                                 -> rules.IgnorePatt
+       / '[]'                                -> rules.ListPatt([])
+       / '[' PITEMS:Ps ']'                   -> rules.ListPatt(Ps)
+       / STRING:S                            -> rules.StrPatt(S)
+       / ID:Ns '.' ID:Func '(' CPATTS:Ps ')' -> rules.StructPatt(Ns, Func, Ps)
+       / ID:Ns '.' ID:Func                   -> rules.StructPatt(Ns, Func, [])
+       / WS PVar:Name !DOTS                  -> rules.VarPatt(Name) ;
+CPRODS := CPROD1:P ( ',' CPROD1 )*:Ps -> *[[P], Ps] ;
+CPROD1 := WS CPROD2:P ( WS CPROD2 )+:Ps -> rules.ConcatOp(P, Ps)
+        / WS CPROD2 ;
+QITEM := WS PVar:N DOTS -> rules.SpliceProd(N)
+       / CPROD1:P       -> rules.ItemProd(P) ;
+QITEMS := QITEM:P ( ',' QITEM )*:Ps -> *[[P], Ps] ;
+CPROD2 := STRING:S                            -> rules.StrProd(S)
+        / Number:N                            -> rules.CharProd(N)
+        / '.gensym(' STRING:S ')'             -> rules.GenSym(S)
+        / '.gensym'                           -> rules.GenSym('gs')
+        / '#' CPROD2:P                        -> rules.LengthOp(P)
+        / '*' CPROD2:P                        -> rules.FlattenOp(P)
+        / '*(' CPROD1:P ')'                   -> rules.FlattenOp(P)
+        / '.line(' CPROD1:P ')'               -> rules.StructProd('builtin', 'Line', [P])
+        / '.block(' CPROD1:P ')'              -> rules.StructProd('builtin', 'Block', [P])
+        / '.join(' CPROD1:P ',' STRING:S ')'  -> rules.JoinOp(S, P)
+        / '[]'                                -> rules.ListProd([])
+        / '[' CPRODS:Ps ']'                   -> rules.ListProd(Ps)
+        / '[' QITEMS:Is ']'                   -> rules.SpliceListProd(Is)
+        / PVar:Name !DOTS                     -> rules.VarProd(Name)
+        / PConst:Name !DOTS !'.'              -> rules.ConstProd(Name)
+        / ID:Ns '.' ID:Func '(' CPRODS:Ps ')' -> rules.StructProd(Ns, Func, Ps)
+        / ID:Ns '.' ID:Func                   -> rules.StructProd(Ns, Func, []) ;
+
+GRAMMAR := '.grammar' ID:Name ( PCLASS / PTOKEN / PRULE / COMMENT )*:Rules
+        -> [py.Compound('def target(driver, *args)',
+               [py.Statement('driver.exe_name = "' Name '".lower() + "c"'),
+                py.Ret('main, None')]),
+            py.Compound('class ' Name 'Parser(object)',
+               *[[py.Compound('def __init__(self, s, uf)',
+                    [py.Statement('self.s = s; self.uf = uf'),
+                     py.Statement('self.lastMatch = []'),
+                     py.Statement('for name in unrolledRels: setattr(self, name, frozenRels[name](uf))'),
+                     py.Statement('for l in unrolledLets: l(uf, self)')
+                  ]),
+                py.Statement('gs = 0'),
+                py.Compound('def gensym(self, s)', [
+                    py.Statement('self.gs += 1'),
+                    py.Ret('s + str(self.gs).decode("utf-8")')
+                ]),
+                py.Compound('def parse(self)',
+                    [py.Ret('self.parse' Name '(0)')])],
+               *Rules]),
+            py.Statement('MainParser = ' Name 'Parser')] ;
+
+PCLASS := 'class' ID:Name '=' CLASSEXPR1:C ';'
+       -> [py.Compound('def cls' Name '(self, c)', [py.Ret(C)])] ;
+CLASSEXPR1 := CLASSEXPR2:L '|' CLASSEXPR1:R -> char.Either(L, R)
+            / CLASSEXPR2 ;
+CLASSEXPR2 := '.any'                                    -> char.Any
+            / '.range(' WS Number:L ':' WS Number:U ')' -> char.Range(L, U)
+            / '~' CLASSEXPR2:S                          -> char.Complement(S)
+            / '(' CLASSEXPR1:S ')'                      -> S
+            / WS Number:C                               -> char.Exactly(C)
+            / ID:N                                      -> char.Call(N) ;
+
+PTOKEN := 'token' ID:Name '=' PSCAN+:Scans ';'
+       -> [py.Compound('def parse' Name '(self, i)',
+                       *[[boundcheck, py.Statement('start = i; assert start >= 0')],
+                       *Scans,
+                       [py.Statement('rv = self.uf.makeStr(self.s[start:i])'),
+                        py.Statement('self.lastMatch.append((u"TOKEN ' Name '", start, i))'),
+                        py.Ret('i, rv')]])] ;
+PSCAN := ID:Cls '*' -> [py.Statement('while i < len(self.s) and self.cls' Cls '(ord(self.s[i])): i += 1')]
+       / ID:Cls '+' -> [py.RaiseIf('i >= len(self.s) or not self.cls' Cls '(ord(self.s[i]))'),
+                        py.Statement('while i < len(self.s) and self.cls' Cls '(ord(self.s[i])): i += 1')]
+       / ID:Cls     -> [py.RaiseIf('i >= len(self.s) or not self.cls' Cls '(ord(self.s[i]))'),
+                        py.Statement('i += 1')] ;
+
+PRULE := ID:Name ':=' PEXPR1:Expr ';'
+       -> [py.Statement('@cached'),
+           py.Compound('def parse' Name '(self, i)',
+           *[[py.Statement('rel = self; uf = self.uf; st = []; env = CapEnv(uf)')], Expr, [py.Ret('i, rv')]])] ;
+PEXPR1 := PEXPR2:This '/' PEXPR1:That -> peg.Choice(This, That)
+        / PEXPR2 ;
+PEXPR2 := PEXPR3:Exprs '->' CPROD1:Prod -> peg.Production(Exprs, Prod)
+        / PEXPR3 ;
+PEXPR3 := PEXPR4*:Exprs -> peg.Sequence(Exprs) ;
+PEXPR4 := PEXPR5:Expr ':' PPATT:P -> peg.Capture(Expr, P)
+        / PEXPR5 ;
+PPATT := ID:Name -> peg.NamePatt(Name) ;
+PEXPR5 := '&' PEXPR6:Expr -> peg.Positive(Expr)
+        / '!' PEXPR6:Expr -> peg.Negative(Expr)
+        / PEXPR6 ;
+PEXPR6 := PEXPR7:Expr '*' -> peg.Any(Expr)
+        / PEXPR7:Expr '+' -> peg.Some(Expr)
+        / PEXPR7:Expr '?' -> peg.Maybe(Expr)
+        / PEXPR7 ;
+PEXPR7 := '(' PEXPR1:Expr ')'   -> Expr
+        / STRING:S              -> peg.Token(S)
+        / ID:Name               -> peg.Call(Name) ;
+
+ZADDY := WS ( RULES / SIGNATURE / GRAMMAR / COMMENT )*:Clss WS
+      -> *[[
+          py.Statement('from rpython.rlib.rfile import create_stdio'),
+          py.Statement('from rpython.rlib.objectmodel import specialize, r_dict, compute_hash'),
+          py.Statement('from rpython.rlib.rarithmetic import intmask'),
+          py.Statement('from rpython.rlib.unroll import unrolling_iterable'),
+          py.Statement('from rpython.rlib.listsort import make_timsort_class'),
+          py.Compound('class ParseError(Exception)', [
+              py.Statement('def __init__(self, reason): self.reason = reason')
+          ]),
+          py.Compound('class NoResults(Exception)', [
+              py.Statement('def __init__(self, message, handle): self.message = message; self.handle = handle')
+          ]),
+          py.Compound('class ZaddyError(Exception)', [
+              py.Statement('def __init__(self, message): self.message = message')
+          ]),
+          py.Compound('class Result(object)', [
+              py.Statement('pass')
+          ]),
+          py.Compound('class Failed(Result)', [
+              py.Statement('pass')
+          ]),
+          py.Statement('failed = Failed()'),
+          py.Compound('def cached(f, cacheCount=[0])', [
+              py.Statement('attr = "t" + str(cacheCount[0]); cacheCount[0] += 1'),
+              py.Statement('name = f.__name__'),
+              py.Statement('uname = unicode(name)'),
+              py.Compound('class CacheResult(Result)', [
+                  py.Statement('def __init__(self, i, rv): setattr(self, attr, (i, rv))')
+              ]),
+              py.Statement('cache = {}'),
+              py.Compound('def deco(self, i)', [
+                  py.Statement('key = i'),
+                  py.Statement('if key in cache and cache[key] is failed: raise ParseError("no reason")'),
+                  py.Statement('elif key in cache: return getattr(cache[key], attr)'),
+                  py.Statement('cache[key] = failed'),
+                  py.Statement('i, rv = f(self, i)'),
+                  py.Statement('cache[key] = CacheResult(i, rv)'),
+                  py.Statement('self.lastMatch.append((uname, key, i))'),
+                  py.Statement('return i, rv')
+              ]),
+              py.Statement('deco.__name__ = name'),
+              py.Statement('return deco')
+          ]),
+          py.Statement('letNames = []'),
+          py.Compound('def let(f)', [
+              py.Statement('letNames.append(f)'),
+              py.Statement('return f')
+          ]),
+          py.Statement('allRels = []'),
+          py.Statement('ruleList = []'),
+          py.Statement('FREE = 0'),
+          py.Statement('COMM = 1'),
+          py.Statement('ASSOC = 2'),
+          py.Statement('AC = 3'),
+          py.Statement('NSTR = 0'),
+          py.Statement('NLIST = 1'),
+          py.Statement('NSTRUCT = 2'),
+          py.Statement('PRODUCTCAP = 64'),
+          py.Statement('FLATCAP = 8'),
+          py.Statement('EXTCAP = 8'),
+          py.Statement('INF = 1 << 60'),
+          py.Compound('class ENode(object)', [
+              py.Compound('def __init__(self, kind, ns, con, ckind, s, args)', [
+                  py.Statement('self.kind = kind; self.ns = ns; self.con = con; self.ckind = ckind'),
+                  py.Statement('self.s = s; self.args = args; self.cls = 0'),
+                  py.Statement('self.subsumed = False; self.dead = False')
+              ]),
+              py.Statement('def live(self): return not self.dead and not self.subsumed'),
+              py.Statement('def tag(self): return self.ns + u"." + self.con')
+          ]),
+          py.Compound('def nodeEq(l, r)', [
+              py.Statement('if l.kind != r.kind or l.ns != r.ns or l.con != r.con or l.s != r.s: return False'),
+              py.Statement('if len(l.args) != len(r.args): return False'),
+              py.Compound('for i in range(len(l.args))', [
+                  py.Statement('if l.args[i] != r.args[i]: return False')
+              ]),
+              py.Statement('return True')
+          ]),
+          py.Compound('def nodeHash(n)', [
+              py.Statement('h = n.kind * 1000003 + compute_hash(n.ns)'),
+              py.Statement('h = intmask(h * 1000003 + compute_hash(n.con))'),
+              py.Statement('h = intmask(h * 1000003 + compute_hash(n.s))'),
+              py.Statement('for a in n.args: h = intmask(h * 1000003 + a)'),
+              py.Statement('return h')
+          ]),
+          py.Compound('def sortInts(xs)', [
+              py.Compound('for i in range(1, len(xs))', [
+                  py.Statement('x = xs[i]; j = i - 1'),
+                  py.Compound('while j >= 0 and xs[j] > x', [
+                      py.Statement('xs[j + 1] = xs[j]; j -= 1')
+                  ]),
+                  py.Statement('xs[j + 1] = x')
+              ])
+          ]),
+          py.Compound('def shortlexLess(l, r)', [
+              py.Statement('if len(l) != len(r): return len(l) < len(r)'),
+              py.Statement('return l < r')
+          ]),
+          py.Compound('def productInts(choices)', [
+              py.Statement('rv = [[]]'),
+              py.Compound('for cs in choices', [
+                  py.Statement('nxt = []'),
+                  py.Compound('for prefix in rv', [
+                      py.Compound('for c in cs', [
+                          py.Statement('if len(nxt) < PRODUCTCAP: nxt.append(prefix + c)')
+                      ])
+                  ]),
+                  py.Statement('rv = nxt')
+              ]),
+              py.Statement('return rv')
+          ]),
+          py.Compound('class UF(object)', [
+              py.Compound('def __init__(self)', [
+                  py.Statement('self.parent = []'),
+                  py.Statement('self.members = []'),
+                  py.Statement('self.nodes = []'),
+                  py.Statement('self.memo = r_dict(nodeEq, nodeHash)'),
+                  py.Statement('self.strs = {}'),
+                  py.Statement('self.byTag = {}'),
+                  py.Statement('self.lists = []'),
+                  py.Statement('self.changes = 0'),
+                  py.Statement('self.unions = 0')
+              ]),
+              py.Compound('def make(self)', [
+                  py.Statement('rv = len(self.parent)'),
+                  py.Statement('self.parent.append(rv)'),
+                  py.Statement('self.members.append([])'),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def find(self, i)', [
+                  py.Statement('j = i'),
+                  py.Statement('while self.parent[j] != j: j = self.parent[j]'),
+                  py.Compound('while self.parent[i] != j', [
+                      py.Statement('k = self.parent[i]; self.parent[i] = j; i = k')
+                  ]),
+                  py.Statement('return j')
+              ]),
+              py.Compound('def union(self, i, j)', [
+                  py.Statement('i = self.find(i); j = self.find(j)'),
+                  py.Statement('if i == j: return False'),
+                  py.Statement('if len(self.members[i]) < len(self.members[j]): i, j = j, i'),
+                  py.Statement('self.parent[j] = i'),
+                  py.Statement('self.members[i].extend(self.members[j])'),
+                  py.Statement('self.members[j] = []'),
+                  py.Statement('self.unions += 1'),
+                  py.Statement('return True')
+              ]),
+              py.Compound('def tagged(self, ns, con)', [
+                  py.Statement('k = ns + u"." + con'),
+                  py.Statement('if k in self.byTag: return self.byTag[k]'),
+                  py.Statement('rv = []'),
+                  py.Statement('self.byTag[k] = rv'),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def canonArgs(self, ckind, args)', [
+                  py.Statement('rv = [self.find(a) for a in args]'),
+                  py.Statement('if ckind == COMM or ckind == AC: sortInts(rv)'),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def intern(self, n)', [
+                  py.Statement('if n in self.memo: return self.find(self.memo[n].cls)'),
+                  py.Statement('c = self.make()'),
+                  py.Statement('n.cls = c'),
+                  py.Statement('self.memo[n] = n'),
+                  py.Statement('self.nodes.append(n)'),
+                  py.Statement('self.members[c].append(n)'),
+                  py.Statement('if n.kind == NLIST: self.lists.append(n)'),
+                  py.Statement('elif n.kind == NSTRUCT: self.tagged(n.ns, n.con).append(n)'),
+                  py.Statement('self.changes += 1'),
+                  py.Statement('return c')
+              ]),
+              py.Compound('def makeStr(self, s)', [
+                  py.Statement('if s in self.strs: return self.find(self.strs[s].cls)'),
+                  py.Statement('n = ENode(NSTR, u"", u"", FREE, s, [])'),
+                  py.Statement('self.strs[s] = n'),
+                  py.Statement('return self.intern(n)')
+              ]),
+              py.Compound('def makeList(self, l)', [
+                  py.Statement('return self.intern(ENode(NLIST, u"", u"", FREE, u"", [self.find(a) for a in l]))')
+              ]),
+              py.Compound('def flatArgs(self, ns, con, args, own)', [
+                  py.Statement('rv = []'),
+                  py.Compound('for a in args', [
+                      py.Statement('sub = self.nodeIn(a, ns, con, own)'),
+                      py.Statement('if sub is None: rv.append(a)'),
+                      py.Statement('else: rv.extend(sub.args)')
+                  ]),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def nodeIn(self, c, ns, con, own)', [
+                  py.Statement('c = self.find(c)'),
+                  py.Statement('if c == own: return None'),
+                  py.Statement('best = None'),
+                  py.Compound('for n in self.members[c]', [
+                      py.Statement('if n.kind != NSTRUCT or not n.live() or n.ns != ns or n.con != con: continue'),
+                      py.Statement('if best is not None and len(n.args) >= len(best.args): continue'),
+                      py.Statement('cyclic = False'),
+                      py.Compound('for a in n.args', [
+                          py.Statement('a = self.find(a)'),
+                          py.Statement('if a == c or a == own: cyclic = True')
+                      ]),
+                      py.Statement('if not cyclic: best = n')
+                  ]),
+                  py.Statement('return best')
+              ]),
+              py.Compound('def struct(self, ns, con, ckind, args)', [
+                  py.Compound('if ckind == ASSOC or ckind == AC', [
+                      py.Statement('flat = self.flatArgs(ns, con, args, -1)'),
+                      py.Statement('if len(flat) <= FLATCAP: args = flat')
+                  ]),
+                  py.Statement('return self.intern(ENode(NSTRUCT, ns, con, ckind, u"", self.canonArgs(ckind, args)))')
+              ]),
+              py.Compound('def subsume(self, n)', [
+                  py.Compound('if not n.subsumed', [
+                      py.Statement('n.subsumed = True'),
+                      py.Statement('self.changes += 1')
+                  ])
+              ]),
+              py.Compound('def listsOf(self, c)', [
+                  py.Statement('rv = []'),
+                  py.Compound('for n in self.members[self.find(c)]', [
+                      py.Statement('if n.kind == NLIST and n.live(): rv.append(n.args)')
+                  ]),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def strsOf(self, c)', [
+                  py.Statement('rv = []'),
+                  py.Compound('for n in self.members[self.find(c)]', [
+                      py.Statement('if n.kind == NSTR and n.live(): rv.append(n.s)')
+                  ]),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def findList(self, c)', [
+                  py.Compound('for n in self.members[self.find(c)]', [
+                      py.Statement('if n.kind == NLIST and n.live(): return n.args')
+                  ]),
+                  py.Statement('raise NoResults("findList", c)')
+              ]),
+              py.Compound('def minStr(self, c)', [
+                  py.Statement('rv = None'),
+                  py.Compound('for n in self.members[self.find(c)]', [
+                      py.Compound('if n.kind == NSTR and n.live()', [
+                          py.Statement('if rv is None or shortlexLess(n.s, rv): rv = n.s')
+                      ])
+                  ]),
+                  py.Statement('return rv')
+              ]),
+              py.Compound('def findStr(self, c)', [
+                  py.Compound('for n in self.members[self.find(c)]', [
+                      py.Statement('if n.kind == NSTR and n.live(): return n.s')
+                  ]),
+                  py.Statement('raise NoResults("findStr", c)')
+              ]),
+              py.Compound('def rebuild(self)', [
+                  py.Compound('while True', [
+                      py.Statement('changed = False'),
+                      py.Statement('memo = r_dict(nodeEq, nodeHash)'),
+                      py.Compound('for n in self.nodes', [
+                          py.Statement('if n.dead: continue'),
+                          py.Statement('n.args = self.canonArgs(n.ckind, n.args)'),
+                          py.Compound('if n in memo', [
+                              py.Statement('other = memo[n]'),
+                              py.Statement('if self.union(other.cls, n.cls): changed = True'),
+                              py.Statement('if n.subsumed: other.subsumed = True'),
+                              py.Statement('n.dead = True')
+                          ]),
+                          py.Statement('else: memo[n] = n')
+                      ]),
+                      py.Statement('self.memo = memo'),
+                      py.Compound('for n in self.nodes[:]', [
+                          py.Statement('if n.dead or n.subsumed or n.kind != NSTRUCT: continue'),
+                          py.Statement('if n.ckind != ASSOC and n.ckind != AC: continue'),
+                          py.Statement('own = self.find(n.cls)'),
+                          py.Statement('flat = self.flatArgs(n.ns, n.con, n.args, own)'),
+                          py.Statement('if len(flat) == len(n.args): continue'),
+                          py.Statement('probe = ENode(NSTRUCT, n.ns, n.con, n.ckind, u"", self.canonArgs(n.ckind, flat))'),
+                          py.Statement('if probe in self.memo and self.union(own, self.memo[probe].cls): changed = True')
+                      ]),
+                      py.Statement('if not changed: break')
+                  ]),
+                  py.Statement('for c in range(len(self.members)): self.members[c] = []'),
+                  py.Statement('alive = []'),
+                  py.Compound('for n in self.nodes', [
+                      py.Statement('if n.dead: continue'),
+                      py.Statement('alive.append(n)'),
+                      py.Statement('self.members[self.find(n.cls)].append(n)')
+                  ]),
+                  py.Statement('self.nodes = alive'),
+                  py.Statement('self.lists = [n for n in self.lists if not n.dead]'),
+                  py.Compound('for k in self.byTag.keys()', [
+                      py.Statement('self.byTag[k] = [n for n in self.byTag[k] if not n.dead]')
+                  ])
+              ])
+          ]),
+          py.Compound('class Env(object)', [
+              py.Compound('def __init__(self, name, cls, elems, next)', [
+                  py.Statement('self.name = name; self.cls = cls; self.elems = elems; self.next = next')
+              ])
+          ]),
+          py.Compound('def envLookup(env, name)', [
+              py.Compound('while env is not None', [
+                  py.Statement('if env.name == name: return env'),
+                  py.Statement('env = env.next')
+              ]),
+              py.Statement('return None')
+          ]),
+          py.Compound('def sameSeq(uf, l, r)', [
+              py.Statement('if len(l) != len(r): return False'),
+              py.Compound('for i in range(len(l))', [
+                  py.Statement('if uf.find(l[i]) != uf.find(r[i]): return False')
+              ]),
+              py.Statement('return True')
+          ]),
+          py.Compound('class Bindings(object)', [
+              py.Compound('def __init__(self, uf, env, rule)', [
+                  py.Statement('self.uf = uf; self.env = env; self.rule = rule')
+              ]),
+              py.Compound('def lookup(self, name)', [
+                  py.Statement('b = envLookup(self.env, name)'),
+                  py.Statement('if b is None: raise ZaddyError("rule " + self.rule + ": unbound variable " + name.encode("utf-8"))'),
+                  py.Statement('return b')
+              ]),
+              py.Compound('def get(self, name)', [
+                  py.Statement('b = self.lookup(name)'),
+                  py.Statement('if b.cls >= 0: return b.cls'),
+                  py.Statement('return self.uf.makeList(b.elems)')
+              ]),
+              py.Compound('def elems(self, name)', [
+                  py.Statement('b = self.lookup(name)'),
+                  py.Statement('if b.cls >= 0: return self.uf.findList(b.cls)'),
+                  py.Statement('return b.elems')
+              ])
+          ]),
+          py.Compound('class CapEnv(object)', [
+              py.Compound('def __init__(self, uf)', [
+                  py.Statement('self.uf = uf; self.d = {}')
+              ]),
+              py.Statement('def set(self, name, rv): self.d[name] = rv'),
+              py.Statement('def get(self, name): return self.d[name]'),
+              py.Statement('def elems(self, name): return self.uf.findList(self.d[name])')
+          ]),
+          py.Compound('class Patt(object)', [
+              py.Statement('def match(self, uf, c, env, out): raise NotImplementedError'),
+              py.Statement('def matchNode(self, uf, n, env, out): pass'),
+              py.Statement('def groupable(self, ns, con): return False'),
+              py.Statement('def isSplice(self): return False'),
+              py.Statement('def candidates(self, uf): raise ZaddyError("rule patterns must be constructors, lists, or strings")'),
+              py.Statement('def extend(self, uf, rule, n, matches): pass')
+          ]),
+          py.Compound('class PIgnore(Patt)', [
+              py.Statement('def match(self, uf, c, env, out): out.append(env)'),
+              py.Statement('def groupable(self, ns, con): return True')
+          ]),
+          py.Compound('class PVar(Patt)', [
+              py.Statement('def __init__(self, name): self.name = name'),
+              py.Compound('def match(self, uf, c, env, out)', [
+                  py.Statement('b = envLookup(env, self.name)'),
+                  py.Statement('if b is None: out.append(Env(self.name, uf.find(c), None, env))'),
+                  py.Compound('elif b.cls >= 0', [
+                      py.Statement('if uf.find(b.cls) == uf.find(c): out.append(env)')
+                  ]),
+                  py.Compound('else', [
+                      py.Compound('for l in uf.listsOf(c)', [
+                          py.Compound('if sameSeq(uf, l, b.elems)', [
+                              py.Statement('out.append(env)'),
+                              py.Statement('return')
+                          ])
+                      ])
+                  ])
+              ]),
+              py.Statement('def groupable(self, ns, con): return True')
+          ]),
+          py.Compound('class PSplice(Patt)', [
+              py.Statement('def __init__(self, name): self.name = name'),
+              py.Statement('def isSplice(self): return True'),
+              py.Statement('def match(self, uf, c, env, out): raise ZaddyError("splice pattern outside of a list")')
+          ]),
+          py.Compound('class PStr(Patt)', [
+              py.Statement('def __init__(self, s): self.s = s'),
+              py.Compound('def match(self, uf, c, env, out)', [
+                  py.Compound('if self.s in uf.strs', [
+                      py.Statement('n = uf.strs[self.s]'),
+                      py.Statement('if not n.subsumed and uf.find(n.cls) == uf.find(c): out.append(env)')
+                  ])
+              ]),
+              py.Compound('def candidates(self, uf)', [
+                  py.Statement('if self.s in uf.strs: return [uf.strs[self.s]]'),
+                  py.Statement('return []')
+              ]),
+              py.Compound('def matchNode(self, uf, n, env, out)', [
+                  py.Statement('if n.kind == NSTR and n.s == self.s: out.append(env)')
+              ])
+          ]),
+          py.Compound('class PStruct(Patt)', [
+              py.Compound('def __init__(self, ns, con, args)', [
+                  py.Statement('self.ns = ns; self.con = con; self.args = args')
+              ]),
+              py.Statement('def groupable(self, ns, con): return self.ns == ns and self.con == con'),
+              py.Statement('def candidates(self, uf): return uf.tagged(self.ns, self.con)[:]'),
+              py.Compound('def match(self, uf, c, env, out)', [
+                  py.Compound('for n in uf.members[uf.find(c)][:]', [
+                      py.Statement('if n.kind == NSTRUCT and n.live(): self.matchNode(uf, n, env, out)')
+                  ])
+              ]),
+              py.Compound('def matchNode(self, uf, n, env, out)', [
+                  py.Statement('if n.ns != self.ns or n.con != self.con: return'),
+                  py.Statement('k = len(self.args)'),
+                  py.Compound('if n.ckind == FREE', [
+                      py.Statement('if len(n.args) != k: return'),
+                      py.Statement('envs = [env]'),
+                      py.Compound('for i in range(k)', [
+                          py.Statement('nxt = []'),
+                          py.Statement('for e in envs: self.args[i].match(uf, n.args[i], e, nxt)'),
+                          py.Statement('envs = nxt')
+                      ]),
+                      py.Statement('out.extend(envs)')
+                  ]),
+                  py.Compound('elif n.ckind == COMM', [
+                      py.Statement('if len(n.args) != k: return'),
+                      py.Statement('self.matchBag(uf, n, 0, n.args[:], env, out)')
+                  ]),
+                  py.Compound('elif n.ckind == ASSOC', [
+                      py.Statement('if len(n.args) < k: return'),
+                      py.Statement('self.matchSeq(uf, n, 0, 0, env, out)')
+                  ]),
+                  py.Compound('else', [
+                      py.Statement('if len(n.args) < k: return'),
+                      py.Statement('self.matchBag(uf, n, 0, n.args[:], env, out)')
+                  ])
+              ]),
+              py.Compound('def extend(self, uf, rule, n, matches)', [
+                  py.Statement('if n.kind != NSTRUCT or n.ns != self.ns or n.con != self.con: return'),
+                  py.Statement('if n.ckind != ASSOC and n.ckind != AC: return'),
+                  py.Statement('k = len(self.args); size = len(n.args)'),
+                  py.Statement('if size <= k or size > EXTCAP: return'),
+                  py.Statement('seen = {}'),
+                  py.Compound('if n.ckind == AC', [
+                      py.Compound('for mask in range(1, 1 << size)', [
+                          py.Statement('sub = []; rest = []'),
+                          py.Compound('for b in range(size)', [
+                              py.Statement('if mask & (1 << b): sub.append(n.args[b])'),
+                              py.Statement('else: rest.append(n.args[b])')
+                          ]),
+                          py.Statement('if len(sub) < k or len(rest) == 0: continue'),
+                          py.Statement('self.extendWith(uf, rule, n, sub, rest, [], seen, matches)')
+                      ])
+                  ]),
+                  py.Compound('else', [
+                      py.Compound('for start in range(size)', [
+                          py.Compound('for stop in range(start + k, size + 1)', [
+                              py.Statement('if stop - start == size: continue'),
+                              py.Statement('self.extendWith(uf, rule, n, n.args[start:stop], n.args[:start], n.args[stop:], seen, matches)')
+                          ])
+                      ])
+                  ])
+              ]),
+              py.Compound('def extendWith(self, uf, rule, n, sub, before, after, seen, matches)', [
+                  py.Statement('key = u",".join([str(uf.find(a)).decode("utf-8") for a in before]) + u"|" + u",".join([str(uf.find(a)).decode("utf-8") for a in sub])'),
+                  py.Statement('if key in seen: return'),
+                  py.Statement('seen[key] = None'),
+                  py.Statement('tmp = ENode(NSTRUCT, n.ns, n.con, n.ckind, u"", uf.canonArgs(n.ckind, sub))'),
+                  py.Statement('envs = []'),
+                  py.Statement('self.matchNode(uf, tmp, None, envs)'),
+                  py.Statement('if not envs: return'),
+                  py.Statement('c = uf.struct(n.ns, n.con, n.ckind, sub)'),
+                  py.Statement('node = uf.memo[tmp] if tmp in uf.memo else None'),
+                  py.Statement('if node is None: return'),
+                  py.Statement('link = ENode(NSTRUCT, n.ns, n.con, n.ckind, u"", uf.canonArgs(n.ckind, before + [c] + after))'),
+                  py.Statement('uf.union(n.cls, uf.intern(link))'),
+                  py.Statement('for env in envs: matches.append(Match(rule, node, env))')
+              ]),
+              py.Compound('def matchGroup(self, uf, n, p, group, env, out)', [
+                  py.Statement('if len(group) == 1: p.match(uf, group[0], env, out)'),
+                  py.Compound('elif p.groupable(self.ns, self.con)', [
+                      py.Statement('c = uf.struct(self.ns, self.con, n.ckind, group)'),
+                      py.Statement('p.match(uf, c, env, out)')
+                  ])
+              ]),
+              py.Compound('def matchSeq(self, uf, n, pi, j, env, out)', [
+                  py.Statement('k = len(self.args)'),
+                  py.Statement('p = self.args[pi]'),
+                  py.Compound('if pi == k - 1', [
+                      py.Statement('self.matchGroup(uf, n, p, n.args[j:], env, out)'),
+                      py.Statement('return')
+                  ]),
+                  py.Statement('last = len(n.args) - (k - 1 - pi)'),
+                  py.Statement('stop = j + 1'),
+                  py.Statement('if p.groupable(self.ns, self.con): stop = last'),
+                  py.Compound('for e in range(j + 1, stop + 1)', [
+                      py.Statement('envs = []'),
+                      py.Statement('self.matchGroup(uf, n, p, n.args[j:e], env, envs)'),
+                      py.Statement('for env2 in envs: self.matchSeq(uf, n, pi + 1, e, env2, out)')
+                  ])
+              ]),
+              py.Compound('def matchBag(self, uf, n, pi, rest, env, out)', [
+                  py.Statement('k = len(self.args)'),
+                  py.Statement('p = self.args[pi]'),
+                  py.Compound('if pi == k - 1', [
+                      py.Statement('if len(rest) == 0: return'),
+                      py.Statement('if len(rest) > 1 and n.ckind == COMM: return'),
+                      py.Statement('self.matchGroup(uf, n, p, rest, env, out)'),
+                      py.Statement('return')
+                  ]),
+                  py.Statement('spare = len(rest) - (k - 1 - pi)'),
+                  py.Statement('if spare < 1: return'),
+                  py.Compound('if p.groupable(self.ns, self.con) and n.ckind == AC and len(rest) <= 12', [
+                      py.Statement('total = 1 << len(rest)'),
+                      py.Compound('for mask in range(1, total)', [
+                          py.Statement('group = []; remain = []'),
+                          py.Compound('for b in range(len(rest))', [
+                              py.Statement('if mask & (1 << b): group.append(rest[b])'),
+                              py.Statement('else: remain.append(rest[b])')
+                          ]),
+                          py.Statement('if len(group) > spare: continue'),
+                          py.Statement('envs = []'),
+                          py.Statement('self.matchGroup(uf, n, p, group, env, envs)'),
+                          py.Statement('for env2 in envs: self.matchBag(uf, n, pi + 1, remain, env2, out)')
+                      ])
+                  ]),
+                  py.Compound('else', [
+                      py.Compound('for b in range(len(rest))', [
+                          py.Statement('if b > 0 and uf.find(rest[b]) == uf.find(rest[b - 1]): continue'),
+                          py.Statement('remain = rest[:b] + rest[b + 1:]'),
+                          py.Statement('envs = []'),
+                          py.Statement('p.match(uf, rest[b], env, envs)'),
+                          py.Statement('for env2 in envs: self.matchBag(uf, n, pi + 1, remain, env2, out)')
+                      ])
+                  ])
+              ])
+          ]),
+          py.Compound('class PList(Patt)', [
+              py.Compound('def __init__(self, items)', [
+                  py.Statement('self.items = items'),
+                  py.Statement('self.need = [0] * (len(items) + 1)'),
+                  py.Compound('for i in range(len(items) - 1, -1, -1)', [
+                      py.Statement('self.need[i] = self.need[i + 1]'),
+                      py.Statement('if not items[i].isSplice(): self.need[i] += 1')
+                  ])
+              ]),
+              py.Statement('def candidates(self, uf): return uf.lists[:]'),
+              py.Compound('def match(self, uf, c, env, out)', [
+                  py.Compound('for n in uf.members[uf.find(c)][:]', [
+                      py.Statement('if n.kind == NLIST and n.live(): self.matchNode(uf, n, env, out)')
+                  ])
+              ]),
+              py.Compound('def matchNode(self, uf, n, env, out)', [
+                  py.Statement('if n.kind != NLIST: return'),
+                  py.Statement('if len(n.args) < self.need[0]: return'),
+                  py.Statement('self.seq(uf, n.args, 0, 0, env, out)')
+              ]),
+              py.Compound('def seq(self, uf, args, i, j, env, out)', [
+                  py.Compound('if i == len(self.items)', [
+                      py.Statement('if j == len(args): out.append(env)'),
+                      py.Statement('return')
+                  ]),
+                  py.Statement('it = self.items[i]'),
+                  py.Compound('if isinstance(it, PSplice)', [
+                      py.Statement('b = envLookup(env, it.name)'),
+                      py.Compound('if b is None', [
+                          py.Compound('for e in range(j, len(args) - self.need[i + 1] + 1)', [
+                              py.Statement('self.seq(uf, args, i + 1, e, Env(it.name, -1, args[j:e], env), out)')
+                          ])
+                      ]),
+                      py.Compound('else', [
+                          py.Statement('cands = [b.elems]'),
+                          py.Statement('if b.cls >= 0: cands = uf.listsOf(b.cls)'),
+                          py.Compound('for l in cands', [
+                              py.Statement('e = j + len(l)'),
+                              py.Statement('if e <= len(args) and sameSeq(uf, args[j:e], l): self.seq(uf, args, i + 1, e, env, out)')
+                          ])
+                      ])
+                  ]),
+                  py.Compound('elif j < len(args)', [
+                      py.Statement('envs = []'),
+                      py.Statement('it.match(uf, args[j], env, envs)'),
+                      py.Statement('for env2 in envs: self.seq(uf, args, i + 1, j + 1, env2, out)')
+                  ])
+              ])
+          ]),
+          py.Compound('class Rule(object)', [
+              py.Compound('def __init__(self, name, patt, rhs, simplify)', [
+                  py.Statement('self.name = name; self.patt = patt; self.rhs = rhs; self.simplify = simplify'),
+                  py.Statement('self.fired = 0')
+              ])
+          ]),
+          py.Compound('def rewrite(name, patt, simplify)', [
+              py.Compound('def deco(f)', [
+                  py.Statement('ruleList.append(Rule(name, patt, f, simplify))'),
+                  py.Statement('return f')
+              ]),
+              py.Statement('return deco')
+          ]),
+          py.Compound('class Match(object)', [
+              py.Compound('def __init__(self, rule, node, env)', [
+                  py.Statement('self.rule = rule; self.node = node; self.env = env')
+              ])
+          ]),
+          py.Compound('class builtinRels(object)', [
+              py.Statement('ns = u"builtin"'),
+              py.Statement('def __init__(self, uf): self.uf = uf'),
+              py.Statement('def makeLine(self, s): return self.uf.struct(self.ns, u"Line", FREE, [s])'),
+              py.Statement('def makeBlock(self, ls): return self.uf.struct(self.ns, u"Block", FREE, [ls])'),
+              py.Statement('def makeFlatten(self, ls): return self.uf.struct(self.ns, u"Flatten", FREE, [ls])'),
+              py.Statement('def makeLength(self, s): return self.uf.struct(self.ns, u"Length", FREE, [s])'),
+              py.Statement('def makeJoin(self, s, ps): return self.uf.struct(self.ns, u"Join", FREE, [s, ps])'),
+              py.Statement('def makeConcat(self, p, ps): return self.uf.struct(self.ns, u"Concat", FREE, [p, ps])')
+          ]),
+          py.Statement('allRels.append(("builtin", builtinRels))'),
+          py.Compound('def evalBuiltins(uf, out)', [
+              py.Compound('for n in uf.tagged(u"builtin", u"Flatten")[:]', [
+                  py.Statement('if not n.live(): continue'),
+                  py.Compound('for ls in uf.listsOf(n.args[0])', [
+                      py.Compound('if len(ls) == 1', [
+                          py.Statement('out.append((n.cls, ls[0]))'),
+                          py.Statement('continue')
+                      ]),
+                      py.Statement('choices = [uf.listsOf(x) for x in ls]'),
+                      py.Statement('for l in productInts(choices): out.append((n.cls, uf.makeList(l)))')
+                  ])
+              ]),
+              py.Compound('for n in uf.tagged(u"builtin", u"Length")[:]', [
+                  py.Statement('if not n.live(): continue'),
+                  py.Statement('s = uf.minStr(n.args[0])'),
+                  py.Statement('if s is not None: out.append((n.cls, uf.makeStr(str(len(s)).decode("utf-8"))))')
+              ]),
+              py.Compound('for n in uf.tagged(u"builtin", u"Join")[:]', [
+                  py.Statement('if not n.live(): continue'),
+                  py.Statement('sep = uf.minStr(n.args[0])'),
+                  py.Statement('if sep is None: continue'),
+                  py.Compound('for ls in uf.listsOf(n.args[1])', [
+                      py.Statement('parts = minStrs(uf, ls)'),
+                      py.Statement('if parts is not None: out.append((n.cls, uf.makeStr(sep.join(parts))))')
+                  ])
+              ]),
+              py.Compound('for n in uf.tagged(u"builtin", u"Concat")[:]', [
+                  py.Statement('if not n.live(): continue'),
+                  py.Compound('for ls in uf.listsOf(n.args[1])', [
+                      py.Compound('if len(ls) == 0', [
+                          py.Statement('out.append((n.cls, n.args[0]))'),
+                          py.Statement('continue')
+                      ]),
+                      py.Statement('parts = minStrs(uf, [n.args[0]] + ls)'),
+                      py.Statement('if parts is not None: out.append((n.cls, uf.makeStr(u"".join(parts))))')
+                  ])
+              ])
+          ]),
+          py.Compound('def minStrs(uf, cs)', [
+              py.Statement('rv = []'),
+              py.Compound('for c in cs', [
+                  py.Statement('s = uf.minStr(c)'),
+                  py.Statement('if s is None: return None'),
+                  py.Statement('rv.append(s)')
+              ]),
+              py.Statement('return rv')
+          ]),
+          py.Compound('def saturate(uf, parser, limit, nodeLimit, verbose, stderr)', [
+              py.Statement('iteration = 0'),
+              py.Compound('while iteration < limit', [
+                  py.Statement('uf.rebuild()'),
+                  py.Statement('before = uf.changes + uf.unions'),
+                  py.Statement('matches = []'),
+                  py.Compound('for rule in ruleList', [
+                      py.Compound('for n in rule.patt.candidates(uf)', [
+                          py.Statement('if not n.live(): continue'),
+                          py.Statement('envs = []'),
+                          py.Statement('rule.patt.matchNode(uf, n, None, envs)'),
+                          py.Statement('for env in envs: matches.append(Match(rule, n, env))'),
+                          py.Statement('rule.patt.extend(uf, rule, n, matches)')
+                      ])
+                  ]),
+                  py.Statement('pending = []'),
+                  py.Statement('evalBuiltins(uf, pending)'),
+                  py.Compound('for m in matches', [
+                      py.Statement('try: rv = m.rule.rhs(uf, parser, Bindings(uf, m.env, m.rule.name))'),
+                      py.Statement('except NoResults: continue'),
+                      py.Statement('for c in rv: uf.union(m.node.cls, c)'),
+                      py.Statement('if m.rule.simplify: uf.subsume(m.node)'),
+                      py.Statement('m.rule.fired += 1')
+                  ]),
+                  py.Statement('for (a, b) in pending: uf.union(a, b)'),
+                  py.Statement('iteration += 1'),
+                  py.Statement('if verbose: stderr.write("Iteration %d: %d matches, %d classes, %d nodes\\n" % (iteration, len(matches), len(uf.parent), len(uf.nodes)))'),
+                  py.Statement('if uf.changes + uf.unions == before: break'),
+                  py.Compound('if len(uf.nodes) > nodeLimit', [
+                      py.Statement('stderr.write("Warning: stopped after %d iterations at the limit of %d e-nodes\\n" % (iteration, nodeLimit))'),
+                      py.Statement('break')
+                  ])
+              ]),
+              py.Statement('uf.rebuild()'),
+              py.Statement('return iteration')
+          ]),
+          py.Statement('TSTR = 0'),
+          py.Statement('TLINE = 1'),
+          py.Statement('TLIST = 2'),
+          py.Compound('class Extractor(object)', [
+              py.Compound('def __init__(self, uf)', [
+                  py.Statement('self.uf = uf'),
+                  py.Statement('size = len(uf.parent)'),
+                  py.Statement('self.costS = [INF] * size'),
+                  py.Statement('self.bestS = [u""] * size'),
+                  py.Statement('self.costB = [INF] * size'),
+                  py.Statement('self.bestB = [None] * size'),
+                  py.Statement('self.costL = [INF] * size'),
+                  py.Statement('self.bestL = [None] * size')
+              ]),
+              py.Compound('def run(self)', [
+                  py.Statement('uf = self.uf'),
+                  py.Statement('changed = True'),
+                  py.Compound('while changed', [
+                      py.Statement('changed = False'),
+                      py.Compound('for n in uf.nodes', [
+                          py.Statement('if not n.live(): continue'),
+                          py.Statement('c = uf.find(n.cls)'),
+                          py.Compound('if n.kind == NSTR', [
+                              py.Compound('if self.costS[c] > 1 or (self.costS[c] == 1 and shortlexLess(n.s, self.bestS[c]))', [
+                                  py.Statement('self.costS[c] = 1; self.bestS[c] = n.s; changed = True')
+                              ])
+                          ]),
+                          py.Compound('elif n.kind == NLIST', [
+                              py.Statement('cost = 1'),
+                              py.Compound('for a in n.args', [
+                                  py.Statement('cost += self.costB[uf.find(a)]'),
+                                  py.Statement('if cost >= INF: break')
+                              ]),
+                              py.Compound('if cost < self.costL[c]', [
+                                  py.Statement('self.costL[c] = cost; self.bestL[c] = n; changed = True')
+                              ])
+                          ]),
+                          py.Compound('elif n.ns == u"builtin" and n.con == u"Line"', [
+                              py.Statement('cost = 1 + self.costS[uf.find(n.args[0])]'),
+                              py.Compound('if cost < self.costB[c]', [
+                                  py.Statement('self.costB[c] = cost; self.bestB[c] = n; changed = True')
+                              ])
+                          ]),
+                          py.Compound('elif n.ns == u"builtin" and n.con == u"Block"', [
+                              py.Statement('cost = 1 + self.costL[uf.find(n.args[0])]'),
+                              py.Compound('if cost < self.costB[c]', [
+                                  py.Statement('self.costB[c] = cost; self.bestB[c] = n; changed = True')
+                              ])
+                          ])
+                      ])
+                  ])
+              ]),
+              py.Compound('def emitList(self, c, depth, buf)', [
+                  py.Statement('n = self.bestL[self.uf.find(c)]'),
+                  py.Statement('assert n is not None'),
+                  py.Statement('for a in n.args: self.emitLine(a, depth, buf)')
+              ]),
+              py.Compound('def emitLine(self, c, depth, buf)', [
+                  py.Statement('n = self.bestB[self.uf.find(c)]'),
+                  py.Statement('assert n is not None'),
+                  py.Statement('if n.con == u"Line": buf.append(u" " * (depth * 4) + self.bestS[self.uf.find(n.args[0])])'),
+                  py.Statement('else: self.emitList(n.args[0], depth + 1, buf)')
+              ]),
+              py.Compound('def diagnose(self, root)', [
+                  py.Statement('uf = self.uf'),
+                  py.Statement('seen = {}'),
+                  py.Statement('stack = [uf.find(root)]'),
+                  py.Statement('stuck = []'),
+                  py.Compound('while stack', [
+                      py.Statement('c = stack.pop()'),
+                      py.Statement('if c in seen: continue'),
+                      py.Statement('seen[c] = None'),
+                      py.Statement('ok = self.costS[c] < INF or self.costB[c] < INF or self.costL[c] < INF'),
+                      py.Compound('for n in uf.members[c]', [
+                          py.Statement('if not n.live(): continue'),
+                          py.Statement('for a in n.args: stack.append(uf.find(a))'),
+                          py.Statement('if ok or n.kind != NSTRUCT or n.ns == u"builtin": continue'),
+                          py.Statement('stuck.append(n.tag())')
+                      ])
+                  ]),
+                  py.Statement('return stuck')
+              ])
+          ]),
+          py.Compound('def describeStuck(stuck)', [
+              py.Statement('counts = {}'),
+              py.Statement('order = []'),
+              py.Compound('for t in stuck', [
+                  py.Compound('if t not in counts', [
+                      py.Statement('counts[t] = 0'),
+                      py.Statement('order.append(t)')
+                  ]),
+                  py.Statement('counts[t] += 1')
+              ]),
+              py.Statement('return [t + u" (" + str(counts[t]).decode("utf-8") + u")" for t in order]')
+          ]),
+          py.Compound('def lineNumber(s, i)', [
+              py.Statement('assert i >= 0'),
+              py.Statement('return s.count(unichr(10), 0, i)')
+          ]),
+          py.Statement('SortTraces = make_timsort_class(lt=lambda l, r: l[2] > r[2])'),
+          py.Statement('USAGE = "usage: %s [-v] [-i ITERATIONS] [-n NODES] < input > output\\n"'),
+          py.Compound('def main(argv)', [
+              py.Statement('stdin, stdout, stderr = create_stdio()'),
+              py.Statement('verbose = False'),
+              py.Statement('limit = 1000'),
+              py.Statement('nodeLimit = 1000000'),
+              py.Statement('i = 1'),
+              py.Compound('while i < len(argv)', [
+                  py.Statement('if argv[i] == "-v": verbose = True'),
+                  py.Compound('elif argv[i] == "-i" and i + 1 < len(argv)', [
+                      py.Statement('i += 1'),
+                      py.Statement('limit = int(argv[i])')
+                  ]),
+                  py.Compound('elif argv[i] == "-n" and i + 1 < len(argv)', [
+                      py.Statement('i += 1'),
+                      py.Statement('nodeLimit = int(argv[i])')
+                  ]),
+                  py.Compound('else', [
+                      py.Statement('stderr.write(USAGE % argv[0])'),
+                      py.Statement('return 2')
+                  ]),
+                  py.Statement('i += 1')
+              ]),
+              py.Statement('uf = UF()'),
+              py.Statement('parser = MainParser(stdin.read().decode("utf-8"), uf)'),
+              py.Compound('try', [
+                  py.Statement('i, l = parser.parse()'),
+                  py.Statement('if i != len(parser.s): raise ParseError("Failed to consume all input")')
+              ]),
+              py.Compound('except ParseError as pe', [
+                  py.Statement('stderr.write("Parse error: %s\\n" % pe.reason)'),
+                  py.Statement('SortTraces(parser.lastMatch).sort()'),
+                  py.Statement('newlines = [0]'),
+                  py.Compound('for line in parser.s.split(u"\\n")', [
+                      py.Statement('newlines.append(newlines[-1] + len(line) + 1)')
+                  ]),
+                  py.Compound('for k, start, stop in parser.lastMatch[:10]', [
+                      py.Statement('startLine = lineNumber(parser.s, start)'),
+                      py.Statement('startCol = start - newlines[startLine]'),
+                      py.Statement('stopLine = lineNumber(parser.s, stop)'),
+                      py.Statement('stopCol = stop - newlines[stopLine]'),
+                      py.Statement('t = k.encode("utf-8"), startLine + 1, startCol, stopLine + 1, stopCol'),
+                      py.Statement('stderr.write(("Trail: %s (%d:%d - %d:%d)" % t) + chr(10))')
+                  ]),
+                  py.Statement('return 1')
+              ]),
+              py.Statement('root = parser.builtin.makeFlatten(l)'),
+              py.Statement('try: iterations = saturate(uf, parser, limit, nodeLimit, verbose, stderr)'),
+              py.Compound('except ZaddyError as ze', [
+                  py.Statement('stderr.write("Error: %s\\n" % ze.message)'),
+                  py.Statement('return 3')
+              ]),
+              py.Compound('if verbose', [
+                  py.Compound('for rule in ruleList', [
+                      py.Statement('if rule.fired: stderr.write("Rule %s: %d applications\\n" % (rule.name, rule.fired))')
+                  ])
+              ]),
+              py.Statement('ex = Extractor(uf)'),
+              py.Statement('ex.run()'),
+              py.Statement('root = uf.find(root)'),
+              py.Compound('if ex.costL[root] >= INF', [
+                  py.Statement('stderr.write("Error: no output could be extracted after %d iterations\\n" % iterations)'),
+                  py.Statement('stderr.write("Constructors which were never rewritten:\\n")'),
+                  py.Statement('for t in describeStuck(ex.diagnose(root))[:20]: stderr.write("  %s\\n" % t.encode("utf-8"))'),
+                  py.Statement('return 3')
+              ]),
+              py.Statement('buf = []'),
+              py.Statement('ex.emitList(root, 0, buf)'),
+              py.Statement('stdout.write(u"\\n".join(buf).encode("utf-8"))'),
+              py.Statement('stdout.write("\\n")'),
+              py.Statement('if verbose: stderr.write("Wrote %d lines after %d iterations\\n" % (len(buf), iterations))'),
+              py.Statement('return 0')
+          ])
+          ], *Clss, [
+          py.Statement('frozenRels = dict(allRels)'),
+          py.Statement('unrolledRels = unrolling_iterable(frozenRels)'),
+          py.Statement('frozenLets = letNames[:]'),
+          py.Statement('unrolledLets = unrolling_iterable(frozenLets)')
+          ]] ;

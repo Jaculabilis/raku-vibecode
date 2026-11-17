@@ -1,0 +1,57 @@
+-- An algebraic simplifier demonstrating ACE-matching.
+--
+-- Add and Mul are declared associative and commutative (.ac), so their
+-- e-nodes are stored flattened as multisets and patterns match them modulo
+-- AC.  Repeated pattern variables require equal e-classes, and congruence
+-- closure makes equal subterms interchangeable.  Printing rules produce many
+-- equivalent strings for each e-class; extraction keeps the shortest.
+
+.signature ops
+
+expr = Num(string n)
+     | Var(string v)
+     | Neg(expr e)
+     | Add(expr l, expr r) .ac
+     | Mul(expr l, expr r) .ac
+
+.signature out
+
+line = Print(expr e)
+
+.rules
+
+addZero   @ ops.Add(X, ops.Num('0'))               <=> X ;
+mulOne    @ ops.Mul(X, ops.Num('1'))               ==> X ;
+mulZero   @ ops.Mul(_, ops.Num('0'))               <=> ops.Num('0') ;
+negNeg    @ ops.Neg(ops.Neg(X))                    ==> X ;
+addNeg    @ ops.Add(X, ops.Neg(X))                 ==> ops.Num('0') ;
+double    @ ops.Add(X, X)                          ==> ops.Mul(ops.Num('2'), X) ;
+factor    @ ops.Add(ops.Mul(A, B), ops.Mul(A, C))  ==> ops.Mul(A, ops.Add(B, C)) ;
+
+showNum   @ ops.Num(N)    ==> N ;
+showVar   @ ops.Var(V)    ==> V ;
+showNeg   @ ops.Neg(X)    ==> '-' X ;
+showAdd   @ ops.Add(X, Y) ==> '(' X ' + ' Y ')' ;
+showMul   @ ops.Mul(X, Y) ==> X ' * ' Y ;
+showPrint @ out.Print(E)  ==> [.line(E)] ;
+
+.grammar ARITH
+
+class Whitespace = 9 | 10 | 13 | 32 ;
+class Digit = .range(48:57) ;
+class Lower = .range(97:122) ;
+
+token WS = Whitespace* ;
+token Num = Digit+ ;
+token Var = Lower+ ;
+
+ARITH := LINE*:Ls WS -> Ls ;
+LINE := EXPR:E ';' -> out.Print(E) ;
+EXPR := TERM:L '+' EXPR:R -> ops.Add(L, R)
+      / TERM ;
+TERM := FACTOR:L '*' TERM:R -> ops.Mul(L, R)
+      / FACTOR ;
+FACTOR := '-' FACTOR:F -> ops.Neg(F)
+        / '(' EXPR:E ')' -> E
+        / WS Num:N -> ops.Num(N)
+        / WS Var:V -> ops.Var(V) ;

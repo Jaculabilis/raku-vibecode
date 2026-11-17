@@ -1,0 +1,87 @@
+.signature c
+
+statement = Include(string h)
+          | Statement(string l)
+          | Block(string head, statement* cs)
+program = Main(statement* cs)
+
+.signature bf
+
+program = Zero
+        | Right(int n)
+        | Left(int n)
+        | Plus(int n)
+        | Minus(int n)
+        | Set(int n)
+        | ScaleAdd(int n, int k)
+        | Output | Input
+        | Loop(program* exprs)
+        | Program(program* exprs)
+
+.rules
+
+cInc    @ c.Include(H)      ==> [.line('#include ' H)] ;
+cStat   @ c.Statement(L)    ==> [.line(L ';')] ;
+cBlock  @ c.Block(Head, Cs) ==> [.line(Head ' {'), .block(*Cs), .line('}')] ;
+
+bfRight @ bf.Right(N)       ==> [c.Statement('ptr += ' N)] ;
+bfLeft  @ bf.Left(N)        ==> [c.Statement('ptr -= ' N)] ;
+bfPlus  @ bf.Plus(N)        ==> [c.Statement('*ptr += ' N)] ;
+bfMinus @ bf.Minus(N)       ==> [c.Statement('*ptr -= ' N)] ;
+bfZero  @ bf.Zero           ==> [c.Statement('*ptr = 0')] ;
+bfSet   @ bf.Set(N)         ==> [c.Statement('*ptr = ' N)] ;
+bfSAdd  @ bf.ScaleAdd(N, K) ==> [c.Statement('*(ptr + ' N ') += *ptr * ' K), c.Statement('*ptr = 0')] ;
+bfOut   @ bf.Output         ==> [c.Statement('putchar(*ptr)')] ;
+bfIn    @ bf.Input          ==> [c.Statement('*ptr = getchar()')] ;
+bfLoop  @ bf.Loop(Exprs)    ==> [c.Block('while (*ptr)', *Exprs)] ;
+bfProg  @ bf.Program(Exprs) ==> [c.Include('<stdio.h>'),
+                                 c.Include('<stdlib.h>'),
+                                 c.Block('int main(int argc, char **argv)', *[
+                                     [c.Statement('static unsigned char arr[30 * 1024]'),
+                                      c.Statement('unsigned char *ptr = arr')],
+                                     *Exprs,
+                                     [c.Statement('return 0')]])] ;
+
+-- Peephole optimizations.  Nested patterns match loop bodies; list patterns
+-- with splices match anywhere inside a sequence (associative matching).
+-- Simplification rules (<=>) retire the matched sequence so that the
+-- e-graph does not keep every intermediate version of a long program.
+
+loopMinus   @ bf.Loop([bf.Minus('1')]) ==> bf.Zero ;
+loopPlus    @ bf.Loop([bf.Plus('1')])  ==> bf.Zero ;
+scaleAddDec @ bf.Loop([bf.Minus('1'), bf.Right(N), bf.Plus(K), bf.Left(N)]) ==> bf.ScaleAdd(N, K) ;
+scaleAddInc @ bf.Loop([bf.Right(N), bf.Plus(K), bf.Left(N), bf.Minus('1')]) ==> bf.ScaleAdd(N, K) ;
+zeroZero    @ [Xs…, bf.Zero, bf.Zero, Ys…]    <=> [Xs…, bf.Zero, Ys…] ;
+zeroPlus    @ [Xs…, bf.Zero, bf.Plus(N), Ys…] <=> [Xs…, bf.Set(N), Ys…] ;
+
+.grammar BF
+
+class Right = 62 ;
+class Left = 60 ;
+class Plus = 43 ;
+class Minus = 45 ;
+class Output = 46 ;
+class Input = 44 ;
+class LoopOpen = 91 ;
+class LoopClose = 93 ;
+class Comment = ~( Right | Left | Plus | Minus | Output | Input | LoopOpen | LoopClose ) ;
+
+token Right = Right+ ;
+token Left = Left+ ;
+token Plus = Plus+ ;
+token Minus = Minus+ ;
+token Output = Comment* Output ;
+token Input = Comment* Input ;
+token LoopOpen = Comment* LoopOpen ;
+token LoopClose = Comment* LoopClose ;
+token Comment = Comment* ;
+
+BF := SQN:P Comment -> bf.Program(P) ;
+SQN := OP*:Ops -> Ops ;
+OP := Comment Right:Cs             -> bf.Right(#Cs)
+    / Comment Left:Cs              -> bf.Left(#Cs)
+    / Comment Plus:Cs              -> bf.Plus(#Cs)
+    / Comment Minus:Cs             -> bf.Minus(#Cs)
+    / Output                       -> bf.Output
+    / Input                        -> bf.Input
+    / LoopOpen SQN:Exprs LoopClose -> bf.Loop(Exprs) ;
