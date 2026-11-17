@@ -1,0 +1,21 @@
+let var i := 0
+    var total := 0
+in
+  /* break leaves the innermost loop only */
+  for a := 1 to 3 do
+    (for b := 1 to 100 do (if b > a then break; total := total + 1));
+  printi(total); print("\n");                      /* expect: 6 */
+  /* break in the middle of an expression */
+  while 1 do (i := i + 1 + (if i > 5 then (break; 0) else 0));
+  printi(i); print("\n");                          /* expect: 6 */
+  /* empty and single-iteration ranges */
+  for k := 5 to 4 do print("never");
+  for k := 7 to 7 do printi(k); print("\n");       /* expect: 7 */
+  /* lazy & and | */
+  /* a & b means "if a then b else 0"; a | b means "if a then 1 else b" */
+  printi(0 & (1 / 0)); printi(1 | (1 / 0)); printi(2 & 3); printi(0 | 0); print("\n"); /* expect: 0130 */
+  printi(-7 / 2); printi(not(5)); printi(not(0)); print("\n"); /* expect: -301 */
+  printi(if 3 > 2 then 10 else 20); print("\n");  /* expect: 10 */
+  let var u := () in u end;
+  exit(3)                                          /* expect exit: 3 */
+end

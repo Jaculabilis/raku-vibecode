@@ -1,0 +1,5 @@
+let
+  type person = {name: string, age: int}
+  function make(name: string, age: int): person = person {name = name, age = age}
+  function older(p: person): person = person {name = p.name, age = p.age + 1}
+in () end

@@ -1,0 +1,8 @@
+// Higher-order functions across languages: Lox closures passed to Monkey,
+// Monkey closures returned to Lox.
+fun makeCounter() {
+  var n = 0;
+  fun step() { n = n + 1; return n; }
+  return step;
+}
+var c = makeCounter();

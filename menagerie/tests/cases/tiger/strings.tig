@@ -1,0 +1,12 @@
+let var s := "a\tb\"c\\d\065|\
+              \e"
+in
+  print(s); print("\n");                              /* expect: a	b"c\dA|e */
+  printi(size(s)); print("\n");                       /* expect: 10 */
+  printi(ord("\^A")); printi(ord("\^_")); printi(ord("\^@")); print("\n"); /* expect: 1310 */
+  printi(ord("")); printi(ord("A")); print(chr(122)); print("\n"); /* expect: -165z */
+  print(substring("hello world", 6, 5)); print("\n"); /* expect: world */
+  print(concat("con", "cat")); print("\n");           /* expect: concat */
+  printi("abc" < "abd"); printi("b" > "abc"); printi("x" <= "x"); printi("" >= "a"); print("\n"); /* expect: 1110 */
+  printi("abc" = "abc"); printi("abc" <> "abc"); print("\n") /* expect: 10 */
+end

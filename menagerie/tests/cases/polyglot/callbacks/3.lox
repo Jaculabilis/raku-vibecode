@@ -1,0 +1,3 @@
+var add10 = adder(10);
+print add10(5);              // expect: 15
+print c();                   // expect: 6

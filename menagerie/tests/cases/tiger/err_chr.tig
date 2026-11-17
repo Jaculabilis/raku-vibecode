@@ -1,0 +1,2 @@
+print(chr(300))
+/* expect runtime error: runtime error: chr: character code 300 out of range */

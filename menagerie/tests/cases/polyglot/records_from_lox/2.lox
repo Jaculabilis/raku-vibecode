@@ -1,0 +1,8 @@
+// Lox reads and writes Tiger record fields as properties.  Lox numbers
+// are converted to Tiger ints at exported functions' boundaries.
+var p = make("Ada", 36);
+print p.name;                // expect: Ada
+print older(p).age;          // expect: 37
+p.age = 99;
+print p.age;                 // expect: 99
+print p;                     // expect: person {name="Ada", age=99}

@@ -1,0 +1,5 @@
+// Lox numbers are floats, hence FLOAT.  The error is reported in the style of the language whose code failed.
+fun go() { return explode(1); }
+print "start";               // expect: start
+go();
+// expect runtime error: ERROR: type mismatch: FLOAT + BOOLEAN

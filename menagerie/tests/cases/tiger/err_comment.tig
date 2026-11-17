@@ -1,0 +1,2 @@
+/* unterminated /* nested */ comment
+/* expect error: unterminated comment */

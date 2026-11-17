@@ -1,0 +1,2 @@
+let function f(x: int) = x in f(1) end
+/* expect error: procedure 'f' must not produce a value */

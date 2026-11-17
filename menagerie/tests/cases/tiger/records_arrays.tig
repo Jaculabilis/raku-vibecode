@@ -1,0 +1,24 @@
+let
+  type point = {x: int, y: int}
+  type tree = {key: int, left: tree, right: tree}
+  type points = array of point
+  function insert(t: tree, k: int) : tree =
+    if t = nil then tree{key = k, left = nil, right = nil}
+    else (if k < t.key then t.left := insert(t.left, k) else t.right := insert(t.right, k); t)
+  function walk(t: tree) =
+    if t <> nil then (walk(t.left); printi(t.key); print(" "); walk(t.right))
+  var root : tree := nil
+  var ps := points [3] of nil
+  var shared := point {x = 1, y = 2}
+  var alias := shared
+in
+  for k := 0 to 9 do root := insert(root, (k * 7) - (k * 7) / 10 * 10);
+  walk(root); print("\n");                      /* expect: 0 1 2 3 4 5 6 7 8 9  */
+  for i := 0 to 2 do ps[i] := point {x = i, y = i * i};
+  printi(ps[2].y); print("\n");                 /* expect: 4 */
+  alias.x := 42;
+  printi(shared.x); print("\n");                /* expect: 42 */
+  printi(shared = alias); printi(shared = point {x = 42, y = 2}); print("\n"); /* expect: 10 */
+  let var same := points [2] of shared in (same[0].y := 9; printi(same[1].y)) end;
+  print("\n")                                   /* expect: 9 */
+end

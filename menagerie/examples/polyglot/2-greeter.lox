@@ -1,0 +1,16 @@
+// A Lox module.  Top-level declarations are globals, visible to every
+// language.  It calls Tiger's fib() and repeat() by name.
+fun shout(s) { return s + "!"; }
+
+class Greeter {
+  init(name) { this.name = name; }
+  greet() { return "Hello, " + this.name + repeat("~", 3); }
+}
+
+fun hello(name) { return Greeter(name).greet(); }
+
+fun fibs(n) {
+  var out = tostr(fib(0));
+  for (var i = 1; i < n; i = i + 1) out = out + " " + tostr(fib(i));
+  return out;
+}

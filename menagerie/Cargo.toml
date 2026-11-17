@@ -1,0 +1,24 @@
+[package]
+name = "menagerie"
+version = "0.1.0"
+edition = "2021"
+description = "Compile Lox, Monkey and Tiger to one common bytecode, and interpret it"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "menageriec"
+path = "src/bin/menageriec.rs"
+
+[[bin]]
+name = "menagerie-vm"
+path = "src/bin/menagerie-vm.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "unwind"

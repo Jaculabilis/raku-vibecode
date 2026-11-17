@@ -1,0 +1,2 @@
+printi(1 / (2 - 2))
+/* expect runtime error: runtime error: division by zero */

@@ -1,0 +1,20 @@
+/* Nested functions see (and update) enclosing variables by reference. */
+let
+  function counter(start: int) : int =
+    let var n := start
+        function inc() = n := n + 1
+        function twice() = (inc(); inc())
+    in twice(); twice(); n
+    end
+  function apply_n(n: int) : int =
+    let var acc := 0
+        function add(k: int) = acc := acc + k
+    in for i := 1 to n do add(i); acc
+    end
+  function even(n: int) : int = if n = 0 then 1 else odd(n - 1)
+  function odd(n: int) : int = if n = 0 then 0 else even(n - 1)
+in
+  printi(counter(10)); print("\n");     /* expect: 14 */
+  printi(apply_n(100)); print("\n");    /* expect: 5050 */
+  printi(even(10)); printi(odd(10)); print("\n") /* expect: 10 */
+end

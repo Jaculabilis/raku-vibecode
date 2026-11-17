@@ -1,0 +1,4 @@
+/* A primitive's declared result type is checked at run time. */
+let primitive notANumber(): int
+in printi(notANumber() + 1) end
+/* expect runtime error: runtime error: expected an int but got string */

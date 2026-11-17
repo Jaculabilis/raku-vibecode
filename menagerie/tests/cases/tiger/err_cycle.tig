@@ -1,0 +1,2 @@
+let type a = b type b = a in 0 end
+/* expect error: cycles must pass through a record or array type */

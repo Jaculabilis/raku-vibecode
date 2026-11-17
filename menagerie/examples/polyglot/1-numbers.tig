@@ -1,0 +1,17 @@
+/* A Tiger library.  Functions declared in the outermost `let` are exported
+   to the shared global namespace; `primitive` declares a function that some
+   other module defines (here: `shout`, written in Lox). */
+let
+  primitive shout(s: string): string
+
+  function fib(n: int): int =
+    if n < 2 then n else fib(n - 1) + fib(n - 2)
+
+  function repeat(s: string, n: int): string =
+    if n <= 0 then "" else concat(s, repeat(s, n - 1))
+
+  function banner(s: string) =
+    (print(shout(s)); print("\n"))
+in
+  ()
+end

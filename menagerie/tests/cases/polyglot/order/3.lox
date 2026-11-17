@@ -1,0 +1,1 @@
+print callLater();           // expect: monkey defined it

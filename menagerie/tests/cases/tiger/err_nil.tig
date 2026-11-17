@@ -1,0 +1,2 @@
+let type r = {f: int} var x : r := nil in printi(x.f) end
+/* expect runtime error: runtime error: field access on a nil record */

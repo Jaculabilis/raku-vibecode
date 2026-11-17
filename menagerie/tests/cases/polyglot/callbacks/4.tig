@@ -1,0 +1,7 @@
+/* Tiger calls Lox and Monkey functions through typed primitives. */
+let
+  primitive c(): int
+  primitive add10(x: int): int
+in
+  printi(add10(c())); print("\n") /* expect: 17 */
+end

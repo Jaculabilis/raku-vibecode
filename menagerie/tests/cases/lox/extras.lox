@@ -1,0 +1,15 @@
+// Behaviour outside the book's test suite.
+var big = 1;
+for (var i = 0; i < 400; i = i + 1) big = big * 10;
+print big;                   // expect: Infinity
+print -big;                  // expect: -Infinity
+print -(0/0) == -(0/0);       // expect: false
+print 123456789012;          // expect: 123456789012
+print 0.1 + 0.2;             // expect: 0.30000000000000004
+print -0;                    // expect: -0
+print clock() > 1000000000;  // expect: true
+fun count(n) { if (n == 0) return 0; return 1 + count(n - 1); }
+print count(50000);          // expect: 50000
+fun forever(n) { return forever(n + 1) + 1; }
+forever(0);
+// expect runtime error: Stack overflow.

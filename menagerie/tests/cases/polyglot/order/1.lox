@@ -1,0 +1,4 @@
+// Modules run in order; late binding lets earlier code call later code once
+// it has been defined.
+fun callLater() { return later(); }
+print "lox first";           // expect: lox first
